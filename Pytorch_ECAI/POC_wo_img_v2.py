@@ -11,8 +11,8 @@ import pandas as pd
 from tqdm import tqdm
 import re
 
-
-import re
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
 
 # Add [CSEP] tokens in between all context sentences 
 def convert_context(context):
@@ -27,7 +27,7 @@ def create_labels(context_sentences, answer_sentences):
     return labels
 
 class EncodingFramework(nn.Module):
-    def __init__(self, model_name='xlnet-base-cased'):
+    def __init__(self, model_name='xlnet-large-cased'):
         super(EncodingFramework, self).__init__()
         self.tokenizer = XLNetTokenizer.from_pretrained(model_name)
         self.model = XLNetModel.from_pretrained(model_name)
@@ -111,7 +111,7 @@ class EncodingFramework(nn.Module):
         #     for j, embedding in enumerate(embeddings):
         #         print(f"  Token {j+1} at position {positions[j]}: Embedding shape: {embedding.shape}")
 
-        return token_embeddings, separator_positions, content_positions
+        return token_embeddings, separators, separator_positions, contents, content_positions
 
 # Define the dataset
 class CustomDataset(Dataset):
@@ -143,6 +143,49 @@ def collate_fn(batch):
         labels_padded[i, :len(label)] = torch.tensor(label, dtype=torch.long)
 
     return texts, labels_padded
+
+
+class TransformerXLFramework(nn.Module):
+    def __init__(self, model_name="transfo-xl/transfo-xl-wt103"):
+        super(TransformerXLFramework, self).__init__()
+        self.model = TransfoXLModel.from_pretrained(model_name)
+
+
+    def forward(self, encodings, separators, separator_positions, contents, content_positions):
+
+        # Transformer-XL expects input in 2D format, so we reshape the embeddings accordingly
+        transformer_xl_output = self.model(inputs_embeds=encodings)
+
+        # Get the token embeddings from Transformer-XL output
+        transformer_xl_embeddings = transformer_xl_output.last_hidden_state
+
+        # Extract the embeddings for each separator token from Transformer-XL output
+        separator_embeddings_xl = {}
+        for sep in separators:
+            positions = separator_positions[sep]
+            embeddings = [transformer_xl_embeddings[0, pos, :] for pos in positions] if positions else []
+            separator_embeddings_xl[sep] = embeddings
+
+        # Extract the embeddings for each content part from Transformer-XL output
+        content_embeddings_xl = []
+        for positions in content_positions:
+            content_part_embeddings = [transformer_xl_embeddings[0, pos, :] for pos in positions]
+            content_embeddings_xl.append(content_part_embeddings)
+
+        # Print out positions and shapes of embeddings for separator tokens from Transformer-XL
+        for sep in separators:
+            positions = separator_positions[sep]
+            embeddings = separator_embeddings_xl[sep]
+            for i, embedding in enumerate(embeddings):
+                print(f"Position of '{sep}' in Transformer-XL: {positions[i]}, Embedding shape: {embedding.shape}")
+
+        # Print out positions and shapes of embeddings for each content part from Transformer-XL
+        for i, (positions, embeddings) in enumerate(zip(content_positions, content_embeddings_xl)):
+            print(f"Content part {i+1} positions in Transformer-XL: {positions}")
+            for j, embedding in enumerate(embeddings):
+                print(f"  Token {j+1} at position {positions[j]}: Embedding shape: {embedding.shape}")
+
+        return transformer_xl_embeddings, separator_embeddings_xl, content_embeddings_xl
 
 
 '''
@@ -222,20 +265,63 @@ valid_loader = DataLoader(valid_dataset, batch_size=2, collate_fn=collate_fn, sh
 test_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn, shuffle=False)
 
 # Define the model, criterion, and optimizer
-hidden_size = 768
 framework = EncodingFramework()
+transformer_framework = TransformerXLFramework()
+# --------------------------------- STEP 2 -------------------------------------------
+''' Pass the XLNet encodings through Transformer XL. Maintain the positions of the
+    seperators and contents as in STEP 1
 
+    Important Notes:
+        1. Transformer excel expects the tensor to have a hidden size of 1024.
+            So, we need to use xlnet-large-cased instead of xlnet-base-cased (hidden_size
+            = 768)
+
+        2. A small change needed to be made in the file for transformer-xl.
+            
+            Filepath: /mnt/Data/abhisek_1921cs16/anaconda3/envs/Multisum/lib/python3.10/site-packages/transformers/models/deprecated/transfo_xl/modeling_transfo_xl.py
+            
+            Replace at line 941:
+            pos_seq = torch.arange(klen - 1, -1, -1.0, device=word_emb.device, dtype=torch.int64).type_as(
+                dtype=word_emb.dtype
+            )
+
+            With:
+            pos_seq = torch.arange(klen - 1, -1, -1.0, device=word_emb.device, dtype=torch.int64).type_as(word_emb)
+'''
 
 # a, b, c, = framework.forward(train_texts[0])
 for texts, labels in train_loader:
     # Forward pass
+
+    ''' 
+    len(encodings) = batch_size
+    len(encodings[0]) = 5 (retuns 5 elements)
+    encodings[0][0].shape = torch.Size([1, 936, 1024]) - last_hidden_state
+    encodings[0][1] = position of seperaters
+    encodings[0][2] = encodings of seperators
+    encoding[0][3] = position of content entities.
+    encodings[0][4] = encodings of content entities
+    Segregating this list in the form [enc1, enc2,...encn], [sep1,...,sepn], 
+    [pos_sep1,...,pos_sepn], [cont1,...,contn], [pos_cont1,...,post_contn]
+
+    '''
     encodings = [framework.forward(text) for text in texts]
-    # len(encodings) = batch_size
-    # len(encodings[0]) = 3
-    # encodings[0][0].shape = torch.Size([1, 1026, 768]) - last_hidden_state
-    # encodings[0][1] = position of seperaters
-    # encoding[0][2] = position of content entities.
-    break
+    xlnet_encodings, sep, sep_pos, cont, cont_pos = [list(group) for group in list(zip(*encodings))]
+
+    ''' 
+    len(transformed_encodings) = batch_size
+    len(transformed_encodings[0]) = 3
+    transformed_encodings[0][0].shape = torch.Size([1, 936, 1024]) - last_hidden_state
+    transformed_encodings[0][1] = embeddings of seperaters from transformer-xl
+    transformed_encodings[0][2] = embeddings of content entities from transformer-xl
+    Segregating this list in the form [enc1, enc2,...encn], [sep1,...,sepn], 
+    [pos_sep1,...,pos_sepn], [cont1,...,contn], [pos_cont1,...,post_contn]
+    
+    '''
+
+    transformed_encodings = [transformer_framework.forward(xlnet_encodings[i], sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(xlnet_encodings))]
+    breakpoint()
+    
 
 
 
