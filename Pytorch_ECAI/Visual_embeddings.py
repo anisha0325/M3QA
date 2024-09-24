@@ -69,7 +69,6 @@ def extract_embeddings(pickle_file):
                     image_embeddings[question_id].append(embedding)
 
     return image_embeddings
-
 # Save the embeddings to a pickle file
 def save_embeddings(embeddings, output_file):
     with open(output_file, 'wb') as f:
