@@ -37,7 +37,8 @@ class CustomDataset(Dataset):
 def collate_fn(batch):
     texts, labels = zip(*batch)
     # texts_padded = pad_sequence(texts, batch_first=True, padding_value=tokenizer.pad_token_id)
-
+    # inputs = tokenizer(list(texts), return_tensors="pt", padding=True, truncation=True)
+    
     # Determine the maximum length of labels in the batch
     max_label_length = max(len(label) for label in labels)
 
@@ -188,7 +189,7 @@ def train_model(model, train_loader, criterion, optimizer):
         encodings = [framework.forward(text) for text in texts]
         # print(encodings[0]['context'].shape)
         transformed_encodings = [transformer_framework.forward(encoding) for encoding in encodings]
-        print([encoding.shape for encoding in transformed_encodings])
+        # print([encoding.shape for encoding in transformed_encodings])
         sentence_vectors = [self_attention_layer(encoding) for encoding in transformed_encodings]
         inter_sentence_vectors = [inter_sentence_attention(vectors) for vectors in sentence_vectors]
         logits = [classification_head(vectors) for vectors in inter_sentence_vectors]
@@ -201,6 +202,11 @@ def train_model(model, train_loader, criterion, optimizer):
         print(len(labels.tolist()[1]))
         labels_tensor = torch.tensor(labels)
         logits_tensor = torch.tensor(logits)
+        
+        # Concatenate logits into a single tensor
+        # logits_tensor = torch.cat(logits, dim=1).squeeze(0)
+        # # Convert labels to a tensor
+        # labels_tensor = torch.cat([torch.tensor(label, dtype=torch.long) for label in labels], dim=0)
         print(type(logits_tensor))
         loss = criterion(logits_tensor, labels_tensor)
         loss.backward()
@@ -235,11 +241,11 @@ def evaluate_model(model, valid_loader, criterion):
 
 
 
-QID_context = pd.read_pickle('QID_context.pkl')
-QID_ans = pd.read_pickle('QID_ans.pkl')
-QID_q_context = pd.read_pickle('QID_q_context.pkl')
-QID_ques = pd.read_pickle('QID_ques.pkl')
-context_qa_list = pd.read_pickle('context_qa_list.pkl')
+QID_context = pd.read_pickle('/home/ninad/vaibhav_r/MedQA/Pytorch_ECAI/QID_context.pkl') # This is a dictionary file which contains 3012 question_ids and their corresponding context
+QID_ans = pd.read_pickle('/home/ninad/vaibhav_r/MedQA/Pytorch_ECAI/QID_ans.pkl')         # This is a dictionary file which contains 3012 question_ids and their corresponding answers
+QID_q_context = pd.read_pickle('/home/ninad/vaibhav_r/MedQA/Pytorch_ECAI/QID_q_context.pkl') # This file is a dict which contains 3012 question_ids and their corresponding "question" , "question type" and "intent type" and "answer"
+QID_ques = pd.read_pickle('/home/ninad/vaibhav_r/MedQA/Pytorch_ECAI/QID_ques.pkl')           # This is a string file which contains a sample question "What are some other reasons for high blood sugar? [SEP] Information [SEP] What"
+context_qa_list = pd.read_pickle('/home/ninad/vaibhav_r/MedQA/Pytorch_ECAI/context_qa_list.pkl')  # This file has 500 elements in the list i.e. 500 context and then for each context there are 7 questions , Question Type and Intent type and answer
 
 labels = []
 corr_context = list(QID_context.values())[:500]
@@ -286,6 +292,9 @@ model = torch.nn.ModuleList([
     framework, transformer_framework, self_attention_layer, inter_sentence_attention, classification_head
 ])
 
+# Input is like this : Question [SEP] Intent [SEP] Question type [SEP] Context [CLS]
+# Output is like this : [ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  1,  0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1, -1, -1]
+
 criterion = torch.nn.CrossEntropyLoss()  # Example loss function
 optimizer = optim.Adam([
     {'params': framework.parameters()},
@@ -304,5 +313,4 @@ for epoch in tqdm(range(5)):  # Number of epochs
     print(f'Train Loss: {train_loss:.4f}')
     print(f'Validation Loss: {valid_loss:.4f}')
     print(f'Validation Accuracy: {valid_accuracy:.4f}')
-
 
