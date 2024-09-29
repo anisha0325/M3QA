@@ -1,0 +1,13 @@
+../Dataset_MedQA/
+test.py
+inspect_pickle.py
+*.jpg
+*.png
+*.jpeg
+*.webp
+*.avif
+*.gif
+*.svg
+*.JPG
+*.com
+*.cms
