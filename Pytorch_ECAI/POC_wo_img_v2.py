@@ -14,15 +14,57 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from entmax import sparsemax, entmax15
+import os
+import numpy as np
+import warnings
+import gc
+import pickle
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(device)
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+#os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"]="0,1,2,3,4,5,6,7"
+
+def set_random_seed(seed: int):
+    """
+    Helper function to seed experiment for reproducibility.
+    If -1 is provided as seed, experiment uses random seed from 0~9999
+    Args:
+        seed (int): integer to be used as seed, use -1 to randomly seed experiment
+    """
+    print("Seed: {}".format(seed))
+
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.enabled = False
+    torch.backends.cudnn.deterministic = True
+
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+set_random_seed(42)
+
+
+
+warnings.filterwarnings("ignore")
+
+print(torch.cuda.is_available())
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda:1")
+    print("Using GPU")
+else:
+    DEVICE = torch.device("cpu")
+    print("Using CPU")
 
 # Add [CSEP] tokens in between all context sentences 
 def convert_context(context):
     sentences = re.split(r'\.\s*', context)
     sentences = [sentence.strip() for sentence in sentences if sentence]
     csep_sentences = ' [SEP] ' + ' [CSEP] '.join(sentences) + ' [CLS] '
+    gc.collect()
     return csep_sentences
 
 def create_labels(context_sentences, answer_sentences):
@@ -84,6 +126,7 @@ class EncodingFramework(nn.Module):
             # print(positions)
 
         # Pass the tokenized input through the XLNet model to get the embeddings
+        input_ids = input_ids.to(DEVICE)
         outputs = self.model(input_ids=input_ids)
 
         # Get the token embeddings (output hidden states)
@@ -114,7 +157,17 @@ class EncodingFramework(nn.Module):
         #     print(f"Content part {i+1} positions: {positions}")
         #     for j, embedding in enumerate(embeddings):
         #         print(f"  Token {j+1} at position {positions[j]}: Embedding shape: {embedding.shape}")
-
+        del input_ids
+        del outputs
+        del tokens
+        del all_separated
+        del no_context
+        del only_context
+        del only_context_items
+        del content_ids
+        
+        gc.collect()
+        torch.cuda.empty_cache()
         return token_embeddings, separators, separator_positions, contents, content_positions
 
 # Define the dataset
@@ -131,6 +184,7 @@ class CustomDataset(Dataset):
         if self.labels is not None:
             label = self.labels[idx]
             return text, label
+        gc.collect()
         return text
     
 # Define collate function
@@ -145,7 +199,7 @@ def collate_fn(batch):
     labels_padded = torch.full((len(labels), max_label_length), fill_value=0, dtype=torch.long)  # Using -1 as padding value
     for i, label in enumerate(labels):
         labels_padded[i, :len(label)] = torch.tensor(label, dtype=torch.long)
-
+    gc.collect()
     return texts, labels_padded
 
 
@@ -189,6 +243,15 @@ class TransformerXLFramework(nn.Module):
         #     for j, embedding in enumerate(embeddings):
         #         print(f"  Token {j+1} at position {positions[j]}: Embedding shape: {embedding.shape}")
 
+        del transformer_xl_output
+        del encodings
+        del separators
+        del content_positions
+        del contents
+        del separator_positions
+
+        gc.collect()
+        torch.cuda.empty_cache()
         return transformer_xl_embeddings, separator_embeddings_xl, content_embeddings_xl
     
 
@@ -213,7 +276,13 @@ class SelfAttentionLayer(nn.Module):
         
         # Apply attention weights to the values
         attended_output = torch.matmul(attention_weights, V)
-        
+
+        del x
+        del attention_scores
+        del attention_weights
+
+        gc.collect()
+        torch.cuda.empty_cache()
         return attended_output
     
 # Function to apply mean pooling
@@ -248,7 +317,11 @@ def mean_pooling(sequence_output, attention_mask, max_sequence_length):
             mean_pooled_output[i] = padded_sentence[i]  # Assign the embedding directly
         else:
             mean_pooled_output[i] = torch.zeros(padded_sentence.size(1), device=padded_sentence.device)  # Zero padding
+
+    del padded_sentence
     
+    gc.collect()
+    torch.cuda.empty_cache()
     return mean_pooled_output, padded_mask  # Shape: (max_seq_len, embedding_dim)
 
 
@@ -285,6 +358,11 @@ def apply_self_attention(context_sentences_emb_list, self_attention_layer):
     # for i, sentence_vector in enumerate(fixed_length_sentence_vectors):
     #     print(f"Fixed-length vector for sentence {i+1}: Shape {sentence_vector.shape}")
 
+    del transfoxl_attention_masks
+    del context_sentences_emb_list
+
+    gc.collect()
+    torch.cuda.empty_cache()
     return torch.stack(fixed_length_sentence_vectors), torch.stack(padded_masks)
 
 class InterSentenceSelfAttention(nn.Module):
@@ -311,6 +389,7 @@ class InterSentenceSelfAttention(nn.Module):
         if mask is not None:
             # Ensure the mask is expanded correctly for broadcasting
             mask_expanded = mask.unsqueeze(1).expand(-1, attention_scores.size(1), -1)  # Shape: (num_sentences, 1, max_seq_len)
+            mask_expanded = mask_expanded.to(DEVICE)
             attention_scores = attention_scores.masked_fill(mask_expanded == 0, float('-inf'))
         
         # Apply α-entmax for sparse attention weights
@@ -318,7 +397,13 @@ class InterSentenceSelfAttention(nn.Module):
 
         # Apply the sparse attention weights to the value matrix (V)
         attended_output = torch.matmul(attention_weights, V)  # Shape: (num_sentences, max_seq_len, embedding_dim)
+        del Q
+        del K
+        del V
+        del attention_scores
         
+        gc.collect()
+        torch.cuda.empty_cache()
         return attended_output, attention_weights
     
 class SentenceRelevanceIdentifier(nn.Module):
@@ -334,6 +419,11 @@ class SentenceRelevanceIdentifier(nn.Module):
         # Pass the pooled output through the feedforward layers
         x = F.relu(self.fc1(pooled_output))  # Apply ReLU activation function
         x = self.fc2(x)  # Output layer
+
+        del pooled_output
+
+        gc.collect()
+        torch.cuda.empty_cache()
         return torch.sigmoid(x)  # Use sigmoid for binary classification output
 
 def convert_tensor(tensor_list):
@@ -348,6 +438,10 @@ def convert_tensor(tensor_list):
     for i, tensor in enumerate(flattened_tensors):
         result[i, :len(tensor)] = tensor
 
+    del flattened_tensors
+
+    gc.collect()
+    torch.cuda.empty_cache()
     return result
 
 import torch
@@ -377,6 +471,11 @@ def pad_tensor_lists(tensor_list1, tensor_list2):
         padded_list1.append(t1.clone().detach().requires_grad_(True))
         padded_list2.append(t2.clone().detach().requires_grad_(True))
 
+    del tensor_list1
+    del tensor_list2
+
+    gc.collect()
+    torch.cuda.empty_cache()
     return torch.stack(padded_list1), torch.stack(padded_list2)
 
 from sklearn.metrics import f1_score
@@ -385,7 +484,15 @@ from sklearn.metrics import f1_score
 def calc_accuracy(preds, labels):
     correct = torch.eq(preds, labels).sum().item()  # Count correct predictions
     total = torch.numel(labels)  # Total number of elements in the labels tensor
+    gc.collect()
     return correct / total
+
+def log_epoch_info(file_path, epoch_num, train_loss, valid_loss, valid_accuracy):
+
+    # Open the file in append mode ('a') to keep adding lines without overwriting
+    with open(file_path, 'a') as f:
+        f.write(f"Epoch: {epoch_num}, Train_loss: {train_loss:.4f}, Valid_loss: {valid_loss:.4f}, Valid_accuracy: {valid_accuracy:.2f}%\n")
+
 
 # # Step 2: F1 Score Calculation (multi-label, per sample)
 # def f1_score_per_sample(preds, labels):
@@ -432,6 +539,7 @@ QID_ans = pd.read_pickle('QID_ans.pkl')
 QID_ques = pd.read_pickle('QID_ques.pkl')
 QID_q_context = pd.read_pickle('QID_q_context.pkl')
 context_qa_list = pd.read_pickle('context_qa_list.pkl')
+QID_q_int_type_cont = pd.read_pickle('QID_q_int_type_cont.pkl')
 
 # --------------------------------- STEP 1 -------------------------------------------
 ''' Create encodings by passing the text through XLNet. Record the positions of the
@@ -441,15 +549,21 @@ context_qa_list = pd.read_pickle('context_qa_list.pkl')
 
 
 # Create dictionary QID_q_int_type_cont
-QID_q_int_type_cont = dict()
+# QID_q_int_type_cont = dict()
 
-for key, value in tqdm(QID_context.items()):
-    converted_context = convert_context(value)
-    QID_q_int_type_cont[key] = QID_ques[key] + converted_context
+# for key, value in tqdm(QID_context.items()):
+#     converted_context = convert_context(value)
+#     QID_q_int_type_cont[key] = QID_ques[key] + converted_context
 
+# with open('QID_q_int_type_cont.pkl', 'wb') as file:
+#     pickle.dump(QID_q_int_type_cont, file)
+
+
+
+num = 15
 labels = []
-corr_context = list(QID_context.values())[:20]
-corr_ans = list(QID_ans.values())[:20]
+corr_context = list(QID_context.values())[:num]
+corr_ans = list(QID_ans.values())[:num]
 for i in range(len(corr_context)):
   context_sent = corr_context[i].split('.')
   ans_sent = corr_ans[i].split('.')
@@ -458,7 +572,7 @@ for i in range(len(corr_context)):
 
 # print(labels)
 
-combined_texts = list(QID_q_int_type_cont.values())[:20]
+combined_texts = list(QID_q_int_type_cont.values())[:num]
 
 # Split the data
 train_texts, temp_texts, train_labels, temp_labels = train_test_split(combined_texts,labels, test_size=0.3, random_state=42)
@@ -477,10 +591,13 @@ train_loader = DataLoader(train_dataset, batch_size=2, collate_fn=collate_fn, sh
 valid_loader = DataLoader(valid_dataset, batch_size=2, collate_fn=collate_fn, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn, shuffle=False)
 
+gc.collect()
+
 def train_model(model, train_loader, criterion, optimizer):
     model.train()
     total_loss = 0
-    for texts, labels in train_loader:
+    for texts, labels in tqdm(train_loader):
+
         optimizer.zero_grad()
         # Forward pass
         encodings = [framework.forward(text) for text in texts]
@@ -501,12 +618,38 @@ def train_model(model, train_loader, criterion, optimizer):
         predictions = [classification_head(vectors) for vectors in attended_sentence_output]
         logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
         padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
-        print(padded_logits)
-        print(padded_labels)
+        padded_labels = padded_labels.to(DEVICE)
+        padded_logits = padded_logits.to(DEVICE)
+        # print(padded_logits)
+        # print(padded_labels)
         loss = criterion(padded_logits, padded_labels)
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
+
+        del encodings
+        del xlnet_encodings
+        del sep
+        del sep_pos
+        del cont
+        del cont_pos
+        del transformed_encodings
+        del transfoxl_embs
+        del transfoxl_sep_embs
+        del transfoxl_cont_embs
+        del transfoxl_context_sentences
+        del attn_context_sentences
+        del fl_sentence_vectors
+        del padded_masks
+        del inter_attended_sentences
+        del attended_sentence_output
+        del inter_sentence_attention_weights
+        del predictions
+        del padded_logits
+        del padded_labels
+        del loss
+        gc.collect()
+        torch.cuda.empty_cache()
 
     return total_loss / len(train_loader)
 
@@ -534,6 +677,8 @@ def evaluate_model(model, valid_loader, criterion):
         predictions = [classification_head(vectors) for vectors in attended_sentence_output]
         logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
         padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
+        padded_labels = padded_labels.to(DEVICE)
+        padded_logits = padded_logits.to(DEVICE)
         loss = criterion(padded_logits, padded_labels)
         loss.backward()
         optimizer.step()
@@ -546,7 +691,35 @@ def evaluate_model(model, valid_loader, criterion):
         accuracy_sample += calc_accuracy(padded_logits, padded_labels)
         # f1_score_sample += f1_score_per_sample(padded_logits, padded_labels)
 
+        del encodings
+        del xlnet_encodings
+        del sep
+        del sep_pos
+        del cont
+        del cont_pos
+        del transformed_encodings
+        del transfoxl_embs
+        del transfoxl_sep_embs
+        del transfoxl_cont_embs
+        del transfoxl_context_sentences
+        del attn_context_sentences
+        del fl_sentence_vectors
+        del padded_masks
+        del inter_attended_sentences
+        del attended_sentence_output
+        del inter_sentence_attention_weights
+        del predictions
+        del padded_logits
+        del padded_labels
+        del loss
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
     accuracy = accuracy_sample / len(valid_loader.dataset)
+    gc.collect()
+    torch.cuda.empty_cache()
     # f1_score = f1_score_sample / len(valid_loader.dataset)
     return total_loss / len(valid_loader), accuracy
 
@@ -565,6 +738,8 @@ model = torch.nn.ModuleList([
     inter_sentence_attention_layer, 
     classification_head
 ])
+model = torch.nn.DataParallel(model)  # Wrap your model for multi-GPU use
+model = model.to(DEVICE)
 criterion = nn.BCELoss()  # Binary Cross Entropy Loss
 optimizer = optim.Adam([
     {'params': framework.parameters()},
@@ -651,6 +826,7 @@ optimizer = optim.Adam([
 #     # breakpoint()
     
 # Training loop
+filepath = "results.txt"
 for epoch in tqdm(range(3)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
     valid_loss, valid_accuracy = evaluate_model(model, valid_loader, criterion)
@@ -659,6 +835,8 @@ for epoch in tqdm(range(3)):  # Number of epochs
     print(f'Train Loss: {train_loss:.4f}')
     print(f'Validation Loss: {valid_loss:.4f}')
     print(f'Validation Accuracy: {valid_accuracy:.4f}')
+
+    log_epoch_info(file_path, epoch, train_loss, valid_loss, valid_accuracy)
     # print(f'Validation F1: {valid_f1:.4f}')
 
 
