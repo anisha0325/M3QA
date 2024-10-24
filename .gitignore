@@ -11,3 +11,10 @@ inspect_pickle.py
 *.JPG
 *.com
 *.cms
+wandb/
+image_embeddings.pkl
+*.err
+*.pkl
+*.log
+*.txt
+*.out

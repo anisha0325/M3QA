@@ -7,8 +7,8 @@ import os
 import glob
 
 # Open the text file for reading
-input_file = "/home/ninad/vaibhav_r/MedQA/Dataset_MedQA/Image_Document.txt"  # Your input text file
-image_dir = "/home/ninad/vaibhav_r/MedQA/Dataset_MedQA/Annotations/"  # Directory containing images
+input_file = "Dataset/New Text Document.txt"  # Your input text file
+image_dir = "Dataset/Annotations/"  # Directory containing images
 
 # List of image file extensions to include
 image_extensions = ['*.jpg', '*.png', '*.jpeg', '*.webp', '*.avif', '*.gif', '*.svg', '*.JPG', '*.com', '*.cms']
