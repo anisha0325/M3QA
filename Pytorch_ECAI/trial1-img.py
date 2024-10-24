@@ -839,7 +839,6 @@ for key, value in QID_ans.items():
         new_image_dict[key] = []
 
 # print(labels)
-
 # combined_texts = list(QID_q_int_type_cont.values())[:num]
 # images = list(img_emb.values())[:num]
 
