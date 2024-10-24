@@ -19,7 +19,7 @@ import numpy as np
 import warnings
 import gc
 import pickle
-import sys,wandb
+import sys #,wandb
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 #os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -632,7 +632,7 @@ def train_model(model, train_loader, criterion, optimizer):
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
-        wandb.log({"batch_loss": loss.item()})
+        # wandb.log({"batch_loss": loss.item()})
         del xlnet_encodings
         del sep
         del sep_pos
@@ -656,7 +656,7 @@ def train_model(model, train_loader, criterion, optimizer):
         del imgs
         gc.collect()
         torch.cuda.empty_cache()
-    wandb.log({"epoch_train_loss": train_loss})
+    # wandb.log({"epoch_train_loss": train_loss})
     return total_loss / len(train_loader)
 
 def evaluate_model(model, valid_loader, criterion):
@@ -741,7 +741,7 @@ def evaluate_model(model, valid_loader, criterion):
     gc.collect()
     torch.cuda.empty_cache()
     # f1_score = f1_score_sample / len(valid_loader.dataset)
-    wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
+    # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
     return total_loss / len(valid_loader), accuracy_sample / len(valid_loader)
 
 # # Step 2: F1 Score Calculation (multi-label, per sample)
@@ -974,13 +974,13 @@ optimizer = optim.Adam([
 #     # breakpoint()
     
 
-wandb.login()
-wandb.init(project='MEDQA-IMG',)
-wandb.config = {
-  "learning_rate": 1e-5,
-  "epochs": 10,
-  "batch_size": 4
-}
+# wandb.login()
+# wandb.init(project='MEDQA-IMG',)
+# wandb.config = {
+#   "learning_rate": 1e-5,
+#   "epochs": 10,
+#   "batch_size": 4
+# }
 
 # Training loop
 file_path = "trial1-img.txt"
@@ -998,4 +998,4 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     # print(f'Validation F1: {valid_f1:.4f}')
 
 
-wandb.finish()
+# wandb.finish()
