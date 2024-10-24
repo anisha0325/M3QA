@@ -19,7 +19,6 @@ import numpy as np
 import warnings
 import gc
 import pickle
-import sys
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 #os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -54,7 +53,7 @@ warnings.filterwarnings("ignore")
 
 print(torch.cuda.is_available())
 if torch.cuda.is_available():
-    DEVICE = torch.device("cuda")
+    DEVICE = torch.device("cuda:1")
     print("Using GPU")
 else:
     DEVICE = torch.device("cpu")
@@ -140,6 +139,13 @@ class EncodingFramework(nn.Module):
             content_positions.append(positions)
             # print(positions)
 
+        # Pass the tokenized input through the XLNet model to get the embeddings
+        input_ids = input_ids.to(DEVICE)
+        outputs = self.model(input_ids=input_ids)
+
+        # Get the token embeddings (output hidden states)
+        token_embeddings = outputs.last_hidden_state
+
         # # Extract the embeddings for each separator token
         # separator_embeddings = {}
         # for sep in separators:
@@ -173,29 +179,10 @@ class EncodingFramework(nn.Module):
         del only_context
         del only_context_items
         del content_ids
-        del separator_ids
-        del positions
-
-        token_embeddings_cpu = token_embeddings.detach().cpu()
-        del token_embeddings
-        # check_mem(token_embeddings)
+        
         gc.collect()
         torch.cuda.empty_cache()
-        # print('5')
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-        return token_embeddings_cpu, separators, separator_positions, contents, content_positions
-
-def check_mem(gpu_tensor):
-    if torch.cuda.is_available():
-        memory_in_bytes = gpu_tensor.numel() * gpu_tensor.element_size()
-
-        # Convert bytes to MB
-        memory_in_MB = memory_in_bytes / (1024 ** 2)
-
-        print(f"Memory occupied by the tensor on GPU: {memory_in_MB:.2f} MB")
-    else:
-        print("CUDA not available. Tensor is on CPU.")
+        return token_embeddings, separators, separator_positions, contents, content_positions
 
 # Define the dataset
 class CustomDataset(Dataset):
@@ -301,6 +288,7 @@ class TransformerXLFramework(nn.Module):
         #     for j, embedding in enumerate(embeddings):
         #         print(f"  Token {j+1} at position {positions[j]}: Embedding shape: {embedding.shape}")
 
+        del transformer_xl_output
         del encodings
         del separators
         del content_positions
@@ -550,156 +538,6 @@ def log_epoch_info(file_path, epoch_num, train_loss, valid_loss, valid_accuracy)
     with open(file_path, 'a') as f:
         f.write(f"Epoch: {epoch_num}, Train_loss: {train_loss:.4f}, Valid_loss: {valid_loss:.4f}, Valid_accuracy: {valid_accuracy:.2f}%\n")
 
-def train_model(model, train_loader, criterion, optimizer):
-    model.train()
-    total_loss = 0
-    for texts, labels in tqdm(train_loader):
-
-        optimizer.zero_grad()
-        print("START")
-        print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-        # Forward pass
-        encodings = [framework.forward(text) for text in texts]
-        print("After EncodingFramework")
-        print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-        xlnet_encodings, sep, sep_pos, cont, cont_pos = zip(*encodings) #[list(group) for group in list(zip(*encodings))]
-        # for enc in xlnet_encodings:
-        #     check_mem(enc)
-        # xlnet_encodings_cpu = [elem.to('cpu') for elem in xlnet_encodings]
-        del encodings
-        gc.collect()
-        torch.cuda.empty_cache()
-        # print(xlnet_encodings_cpu[0].device)
-        # print(type(sep[0]))
-        transformed_encodings = [transformer_framework.forward(xlnet_encodings[i].to(DEVICE), sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(xlnet_encodings))]
-        transfoxl_embs, transfoxl_sep_embs, transfoxl_cont_embs = [list(group) for group in list(zip(*transformed_encodings))]
-        transfoxl_context_sentences = []
-        for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
-            context = elem[3:]
-            transfoxl_context_sentences.append(context)
-        print("After TrandformerXL")
-        print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-        attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
-        fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
-        inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
-                                for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors, padded_masks)]
-    
-        attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
-        print("After Attentions")
-        print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-        print("END of Iter")
-        predictions = [classification_head(vectors) for vectors in attended_sentence_output]
-        logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
-        padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
-        padded_labels = padded_labels.to(DEVICE)
-        padded_logits = padded_logits.to(DEVICE)
-        # print(padded_logits)
-        # print(padded_labels)
-        loss = criterion(padded_logits, padded_labels)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-
-        del texts
-        del xlnet_encodings
-        del sep
-        del sep_pos
-        del cont
-        del cont_pos
-        del transformed_encodings
-        del transfoxl_embs
-        del transfoxl_sep_embs
-        del transfoxl_cont_embs
-        del transfoxl_context_sentences
-        del attn_context_sentences
-        del fl_sentence_vectors
-        del padded_masks
-        del inter_attended_sentences
-        del attended_sentence_output
-        del inter_sentence_attention_weights
-        del logits
-        del labels
-        del predictions
-        del padded_logits
-        del padded_labels
-        del loss
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    return total_loss / len(train_loader)
-
-def evaluate_model(model, valid_loader, criterion):
-    model.eval()
-    total_loss = 0
-    accuracy_sample, f1_score_sample = 0, 0
-    with torch.no_grad():
-        for texts, labels in tqdm(valid_loader):
-            encodings = [framework.forward(text) for text in texts]
-            xlnet_encodings, sep, sep_pos, cont, cont_pos = [list(group) for group in list(zip(*encodings))]
-            transformed_encodings = [transformer_framework.forward(xlnet_encodings[i], sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(xlnet_encodings))]
-            transfoxl_embs, transfoxl_sep_embs, transfoxl_cont_embs = [list(group) for group in list(zip(*transformed_encodings))]
-            transfoxl_context_sentences = []
-            for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
-                context = elem[3:]
-                transfoxl_context_sentences.append(context)
-            attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
-            fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
-            inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
-                                    for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors, padded_masks)]
-        
-            attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
-        
-            predictions = [classification_head(vectors) for vectors in attended_sentence_output]
-            logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
-            padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
-            padded_labels = padded_labels.to(DEVICE)
-            padded_logits = padded_logits.to(DEVICE)
-            loss = criterion(padded_logits, padded_labels)
-            # loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-
-            # Compute accuracy
-            # predictions = torch.argmax(torch.cat(logits), dim=1)
-            # correct_predictions += (predictions == labels).sum().item()
-            accuracy_sample += calc_accuracy(padded_logits, padded_labels)
-            # f1_score_sample += f1_score_per_sample(padded_logits, padded_labels)
-
-            del encodings
-            del xlnet_encodings
-            del sep
-            del sep_pos
-            del cont
-            del cont_pos
-            del transformed_encodings
-            del transfoxl_embs
-            del transfoxl_sep_embs
-            del transfoxl_cont_embs
-            del transfoxl_context_sentences
-            del attn_context_sentences
-            del fl_sentence_vectors
-            del padded_masks
-            del inter_attended_sentences
-            del attended_sentence_output
-            del inter_sentence_attention_weights
-            del predictions
-            del padded_logits
-            del padded_labels
-            del loss
-
-            gc.collect()
-            torch.cuda.empty_cache()
-
-
-    gc.collect()
-    torch.cuda.empty_cache()
-    # f1_score = f1_score_sample / len(valid_loader.dataset)
-    return total_loss / len(valid_loader), accuracy_sample / len(valid_loader)
 
 # # Step 2: F1 Score Calculation (multi-label, per sample)
 # def f1_score_per_sample(preds, labels):
@@ -767,12 +605,10 @@ QID_q_int_type_cont = pd.read_pickle('QID_q_int_type_cont.pkl')
 
 
 
-# num = 100
+num = 15
 labels = []
-# corr_context = list(QID_context.values())[:num]
-# corr_ans = list(QID_ans.values())[:num]
-corr_context = list(QID_context.values())
-corr_ans = list(QID_ans.values())
+corr_context = list(QID_context.values())[:num]
+corr_ans = list(QID_ans.values())[:num]
 for i in range(len(corr_context)):
   context_sent = corr_context[i].split('.')
   ans_sent = corr_ans[i].split('.')
@@ -781,8 +617,7 @@ for i in range(len(corr_context)):
 
 # print(labels)
 
-# combined_texts = list(QID_q_int_type_cont.values())[:num]
-combined_texts = list(QID_q_int_type_cont.values())
+combined_texts = list(QID_q_int_type_cont.values())[:num]
 
 # Split the data
 train_texts, temp_texts, train_labels, temp_labels = train_test_split(combined_texts,labels, test_size=0.3, random_state=42)
@@ -797,12 +632,141 @@ train_dataset = CustomDataset(train_texts, train_labels)
 valid_dataset = CustomDataset(valid_texts, valid_labels)
 test_dataset = CustomDataset(test_texts, test_labels)
 
-batch_size = 4
-train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
-valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
+train_loader = DataLoader(train_dataset, batch_size=2, collate_fn=collate_fn, shuffle=True)
+valid_loader = DataLoader(valid_dataset, batch_size=2, collate_fn=collate_fn, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn, shuffle=False)
 
 gc.collect()
+
+def train_model(model, train_loader, criterion, optimizer):
+    model.train()
+    total_loss = 0
+    for texts, labels in tqdm(train_loader):
+
+        optimizer.zero_grad()
+        # Forward pass
+        encodings = [framework.forward(text) for text in texts]
+        xlnet_encodings, sep, sep_pos, cont, cont_pos = [list(group) for group in list(zip(*encodings))]
+        transformed_encodings = [transformer_framework.forward(xlnet_encodings[i], sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(xlnet_encodings))]
+        transfoxl_embs, transfoxl_sep_embs, transfoxl_cont_embs = [list(group) for group in list(zip(*transformed_encodings))]
+        transfoxl_context_sentences = []
+        for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
+            context = elem[3:]
+            transfoxl_context_sentences.append(context)
+        attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
+        fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
+        inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
+                                for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors, padded_masks)]
+    
+        attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
+    
+        predictions = [classification_head(vectors) for vectors in attended_sentence_output]
+        logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
+        padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
+        padded_labels = padded_labels.to(DEVICE)
+        padded_logits = padded_logits.to(DEVICE)
+        # print(padded_logits)
+        # print(padded_labels)
+        loss = criterion(padded_logits, padded_labels)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+
+        del encodings
+        del xlnet_encodings
+        del sep
+        del sep_pos
+        del cont
+        del cont_pos
+        del transformed_encodings
+        del transfoxl_embs
+        del transfoxl_sep_embs
+        del transfoxl_cont_embs
+        del transfoxl_context_sentences
+        del attn_context_sentences
+        del fl_sentence_vectors
+        del padded_masks
+        del inter_attended_sentences
+        del attended_sentence_output
+        del inter_sentence_attention_weights
+        del predictions
+        del padded_logits
+        del padded_labels
+        del loss
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    return total_loss / len(train_loader)
+
+def evaluate_model(model, valid_loader, criterion):
+    model.eval()
+    total_loss = 0
+    accuracy_sample, f1_score_sample = 0, 0
+    # with torch.no_grad():
+    for texts, labels in tqdm(valid_loader):
+        encodings = [framework.forward(text) for text in texts]
+        xlnet_encodings, sep, sep_pos, cont, cont_pos = [list(group) for group in list(zip(*encodings))]
+        transformed_encodings = [transformer_framework.forward(xlnet_encodings[i], sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(xlnet_encodings))]
+        transfoxl_embs, transfoxl_sep_embs, transfoxl_cont_embs = [list(group) for group in list(zip(*transformed_encodings))]
+        transfoxl_context_sentences = []
+        for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
+            context = elem[3:]
+            transfoxl_context_sentences.append(context)
+        attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
+        fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
+        inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
+                                for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors, padded_masks)]
+    
+        attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
+    
+        predictions = [classification_head(vectors) for vectors in attended_sentence_output]
+        logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
+        padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
+        padded_labels = padded_labels.to(DEVICE)
+        padded_logits = padded_logits.to(DEVICE)
+        loss = criterion(padded_logits, padded_labels)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+        # Compute accuracy
+        # predictions = torch.argmax(torch.cat(logits), dim=1)
+        # correct_predictions += (predictions == labels).sum().item()
+        accuracy_sample += calc_accuracy(padded_logits, padded_labels)
+        # f1_score_sample += f1_score_per_sample(padded_logits, padded_labels)
+
+        del encodings
+        del xlnet_encodings
+        del sep
+        del sep_pos
+        del cont
+        del cont_pos
+        del transformed_encodings
+        del transfoxl_embs
+        del transfoxl_sep_embs
+        del transfoxl_cont_embs
+        del transfoxl_context_sentences
+        del attn_context_sentences
+        del fl_sentence_vectors
+        del padded_masks
+        del inter_attended_sentences
+        del attended_sentence_output
+        del inter_sentence_attention_weights
+        del predictions
+        del padded_logits
+        del padded_labels
+        del loss
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
+    accuracy = accuracy_sample / len(valid_loader.dataset)
+    gc.collect()
+    torch.cuda.empty_cache()
+    # f1_score = f1_score_sample / len(valid_loader.dataset)
+    return total_loss / len(valid_loader), accuracy
 
 # Define the model, criterion, and optimizer
 embedding_dim = 1024 # This is the embeddings dimension of each of transfoxl_embs, can be obtained otherwise by: transfoxl_embs[i].size(-1) 
@@ -907,9 +871,8 @@ optimizer = optim.Adam([
 #     # breakpoint()
     
 # Training loop
-file_path = "trial1.txt"
-EPOCHS = 10
-for epoch in tqdm(range(EPOCHS)):  # Number of epochs
+filepath = "results.txt"
+for epoch in tqdm(range(3)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
     valid_loss, valid_accuracy = evaluate_model(model, valid_loader, criterion)
 

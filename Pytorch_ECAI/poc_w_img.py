@@ -23,7 +23,7 @@ import sys
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 #os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"]="3,4,5,6,7"
+os.environ["CUDA_VISIBLE_DEVICES"]="0,1,2,3,4,5,6,7"
 
 def set_random_seed(seed: int):
     """
@@ -83,30 +83,13 @@ class EncodingFramework(nn.Module):
         # Tokenize the input while keeping special tokens intact
         self.tokenizer.add_special_tokens({'additional_special_tokens': ['[CSEP]', '[SEP]', '[CLS]']})
         self.model.resize_token_embeddings(len(self.tokenizer))
-        # print("1")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
         tokens = self.tokenizer(text, add_special_tokens=True, return_tensors="pt")
         token_cls = self.tokenizer("[CLS]", add_special_tokens = True, return_tensors = "pt")
-
         # Get tokenized IDs
         input_ids = tokens['input_ids']
-        input_ids_cls = token_cls['input_ids']
-
-        input_ids = input_ids.to(DEVICE)
-        input_ids_cls = input_ids_cls.to(DEVICE)
-
-        outputs = self.model(input_ids=input_ids)
-        output_cls = self.model(input_ids=input_ids_cls)
-
-        # Get the token embeddings (output hidden states)
-        token_embeddings = outputs.last_hidden_state
-        cls_embeddings = output_cls.last_hidden_state
-        # print(f"Token IDs: {input_ids}")
-        # print("2")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
         total_tokens = input_ids.size(1)
+        input_ids_cls = token_cls['input_ids']
+        # print(f"Token IDs: {input_ids}")
 
         # Define separator tokens
         separators = ["[SEP]", "[CSEP]"]
@@ -144,26 +127,24 @@ class EncodingFramework(nn.Module):
                     positions.append(pos[0])
             content_positions.append(positions)
             # print(positions)
-        # print(" 3")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-        # Pass the tokenized input through the XLNet model to get the embeddings
 
-        # print(" 4")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
+        # Pass the tokenized input through the XLNet model to get the embeddings
+        input_ids = input_ids.to(DEVICE)
+        input_ids_cls = input_ids_cls.to(DEVICE)
+
+        outputs = self.model(input_ids=input_ids)
+        output_cls = self.model(input_ids=input_ids_cls)
+
+        # Get the token embeddings (output hidden states)
+        token_embeddings = outputs.last_hidden_state
+        cls_embeddings = output_cls.last_hidden_state
+
         # Extract the embeddings for each separator token
         separator_embeddings = {}
         for sep in separators:
             positions = separator_positions[sep]
-            embeddings = [token_embeddings[0, pos, :].detach().cpu() for pos in positions] if positions else []
+            embeddings = [token_embeddings[0, pos, :] for pos in positions] if positions else []
             separator_embeddings[sep] = embeddings
-
-        token_embeddings_cpu = token_embeddings.detach().cpu()
-        cls_embeddings_cpu = cls_embeddings.detach().cpu()
-        # print(" 5")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
 
         # # Extract the embeddings for each content part (separately)
         # content_embeddings = []
@@ -194,12 +175,10 @@ class EncodingFramework(nn.Module):
         del only_context
         del only_context_items
         del content_ids
-        del token_embeddings
-        del cls_embeddings
-
+        
         gc.collect()
         torch.cuda.empty_cache()
-        return token_embeddings_cpu, total_tokens, cls_embeddings_cpu, separators, separator_positions, separator_embeddings, contents, content_positions
+        return token_embeddings, total_tokens, cls_embeddings, separators, separator_positions, separator_embeddings, contents, content_positions
 
 # Define the dataset
 class CustomDataset(Dataset):
@@ -244,41 +223,11 @@ class TransformerXLFramework(nn.Module):
 
     def forward(self, encodings, separators, separator_positions, contents, content_positions):
 
-        # # Transformer-XL expects input in 2D format, so we reshape the embeddings accordingly
-        # transformer_xl_output = self.model(inputs_embeds=encodings)
+        # Transformer-XL expects input in 2D format, so we reshape the embeddings accordingly
+        transformer_xl_output = self.model(inputs_embeds=encodings)
 
-        # # Get the token embeddings from Transformer-XL output
-        # transformer_xl_embeddings = transformer_xl_output.last_hidden_state
-
-        total_len = encodings.size(1)
-        transformer_xl_embeddings = []
-        memory = None  # Initialize memory to None for the first segment
-        chunk_size = 512
-        # print(total_len)
-        # Process each encoding in chunks
-        for i in range(0, total_len, chunk_size):
-            # print()
-            # print(i)
-            # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-            # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-            # Extract chunk of input
-            chunk_encodings = encodings[:, i:i + chunk_size].to(DEVICE)  # Move chunk to GPU
-
-            # Pass chunk through Transformer-XL, along with memory from the previous chunk
-            transformer_xl_output = self.model(inputs_embeds=chunk_encodings, mems=memory)
-
-            # Get the token embeddings from Transformer-XL output
-            transformer_xl_embeddings.append(transformer_xl_output.last_hidden_state.detach().cpu())  # Move output to CPU to save GPU memory
-
-            # Update memory with the current chunk's memory, move memory to GPU for next iteration
-            memory = [mem.to(DEVICE) for mem in transformer_xl_output.mems]
-
-            # Clear the chunk_encodings and output from GPU memory after use
-            del chunk_encodings, transformer_xl_output
-            torch.cuda.empty_cache()  # Free unused memory
-
-        # Concatenate all chunk embeddings along the sequence dimension
-        transformer_xl_embeddings = torch.cat(transformer_xl_embeddings, dim=1)
+        # Get the token embeddings from Transformer-XL output
+        transformer_xl_embeddings = transformer_xl_output.last_hidden_state
 
         # Extract the embeddings for each separator token from Transformer-XL output
         separator_embeddings_xl = {}
@@ -306,6 +255,7 @@ class TransformerXLFramework(nn.Module):
         #     for j, embedding in enumerate(embeddings):
         #         print(f"  Token {j+1} at position {positions[j]}: Embedding shape: {embedding.shape}")
 
+        del transformer_xl_output
         del encodings
         del separators
         del content_positions
@@ -396,12 +346,11 @@ def apply_self_attention(context_sentences_emb_list, self_attention_layer):
 
     # Step 1: Apply self-attention and mean pooling over each sentence embedding
     max_seq_len = max([len(content_embedding) for content_embedding in context_sentences_emb_list])
-    # print(max_seq_len)
     # print(len(context_sentences_emb_list))
     # Step 1: Apply self-attention over each sentence embedding
     for context_sentence, attention_mask in zip(context_sentences_emb_list, transfoxl_attention_masks):
         # print(len(context_sentence))
-        context_sentence_embedding_tensor = torch.stack(context_sentence).to(DEVICE)  # Shape: (seq_len, embedding_dim)
+        context_sentence_embedding_tensor = torch.stack(context_sentence)  # Shape: (seq_len, embedding_dim)
         
         # Apply self-attention over the encoded words of the sentence
         attended_output = self_attention_layer(context_sentence_embedding_tensor.unsqueeze(0))  # Shape: (1, seq_len, embedding_dim)
@@ -567,10 +516,6 @@ def convert_img_shape(img, image_size, embedding_size):
     return projected_image_encoding
 
 def combine_text_img_token(text_encoding, projected_image_encoding, cls_encoding, sep_encoding):
-    text_encoding = text_encoding.to(DEVICE)
-    cls_encoding = cls_encoding.to(DEVICE)
-    projected_image_encoding = projected_image_encoding.to(DEVICE)
-    sep_encoding = sep_encoding.to(DEVICE)
     combined_tensor = torch.cat((text_encoding, sep_encoding, projected_image_encoding, cls_encoding), dim=1)
     return combined_tensor
 
@@ -580,33 +525,18 @@ def train_model(model, train_loader, criterion, optimizer):
     for texts, imgs, labels in tqdm(train_loader):
 
         optimizer.zero_grad()
-        # print(" START")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
         # Forward pass
         encodings = [framework.forward(text) for text in texts]
-        # print("After EncodingFramework")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-        xlnet_encodings, total_tokens, cls_encodings, sep, sep_pos, sep_emb, cont, cont_pos = zip(*encodings)
-        del encodings
-        gc.collect()
-        torch.cuda.empty_cache()
-
+        xlnet_encodings, total_tokens, cls_encodings, sep, sep_pos, sep_emb, cont, cont_pos = [list(group) for group in list(zip(*encodings))]
         sep_token_emb = [elem['[SEP]'][0].unsqueeze(0).unsqueeze(0) for elem in sep_emb]
         sep_all = [elem + ['[CLS]'] for elem in sep]
         for i in range(len(sep_pos)):
             sep_pos[i]['[CLS]'] = total_tokens[i]
-        # print(imgs[i])
         combined_encodings = [combine_text_img_token(xlnet_encodings[i], imgs[i], cls_encodings[i], sep_token_emb[i]) for i in range(len(xlnet_encodings))]
 
         transformed_encodings = [transformer_framework.forward(combined_encodings[i], sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(combined_encodings))]
-
-        # print("After TrandformerXL")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-
         transfoxl_embs, transfoxl_sep_embs, transfoxl_cont_embs = [list(group) for group in list(zip(*transformed_encodings))]
+        
         transfoxl_context_sentences = []
         for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
             context = elem[3:]
@@ -617,10 +547,7 @@ def train_model(model, train_loader, criterion, optimizer):
                                 for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors, padded_masks)]
     
         attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
-        # print("After Attentions")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-        # print("END of Iter")
+    
         predictions = [classification_head(vectors) for vectors in attended_sentence_output]
         logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
         padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
@@ -633,6 +560,7 @@ def train_model(model, train_loader, criterion, optimizer):
         optimizer.step()
         total_loss += loss.item()
 
+        del encodings
         del xlnet_encodings
         del sep
         del sep_pos
@@ -653,7 +581,6 @@ def train_model(model, train_loader, criterion, optimizer):
         del padded_logits
         del padded_labels
         del loss
-        del imgs
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -663,79 +590,76 @@ def evaluate_model(model, valid_loader, criterion):
     model.eval()
     total_loss = 0
     accuracy_sample, f1_score_sample = 0, 0
-    with torch.no_grad():
-        for texts, imgs, labels in tqdm(valid_loader):
-            # encodings = [framework.forward(text) for text in texts]
-            # xlnet_encodings, sep, sep_pos, cont, cont_pos = [list(group) for group in list(zip(*encodings))]
-            # transformed_encodings = [transformer_framework.forward(xlnet_encodings[i], sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(xlnet_encodings))]
+    # with torch.no_grad():
+    for texts, imgs, labels in tqdm(valid_loader):
+        # encodings = [framework.forward(text) for text in texts]
+        # xlnet_encodings, sep, sep_pos, cont, cont_pos = [list(group) for group in list(zip(*encodings))]
+        # transformed_encodings = [transformer_framework.forward(xlnet_encodings[i], sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(xlnet_encodings))]
 
-            encodings = [framework.forward(text) for text in texts]
-            xlnet_encodings, total_tokens, cls_encodings, sep, sep_pos, sep_emb, cont, cont_pos = [list(group) for group in list(zip(*encodings))]
-            sep_token_emb = [elem['[SEP]'][0].unsqueeze(0).unsqueeze(0) for elem in sep_emb]
-            sep_all = [elem + ['[CLS]'] for elem in sep]
-            for i in range(len(sep_pos)):
-                sep_pos[i]['[CLS]'] = total_tokens[i]
-            combined_encodings = [combine_text_img_token(xlnet_encodings[i], imgs[i], cls_encodings[i], sep_token_emb[i]) for i in range(len(xlnet_encodings))]
+        encodings = [framework.forward(text) for text in texts]
+        xlnet_encodings, total_tokens, cls_encodings, sep, sep_pos, sep_emb, cont, cont_pos = [list(group) for group in list(zip(*encodings))]
+        sep_token_emb = [elem['[SEP]'][0].unsqueeze(0).unsqueeze(0) for elem in sep_emb]
+        sep_all = [elem + ['[CLS]'] for elem in sep]
+        for i in range(len(sep_pos)):
+            sep_pos[i]['[CLS]'] = total_tokens[i]
+        combined_encodings = [combine_text_img_token(xlnet_encodings[i], imgs[i], cls_encodings[i], sep_token_emb[i]) for i in range(len(xlnet_encodings))]
 
-            transformed_encodings = [transformer_framework.forward(combined_encodings[i], sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(combined_encodings))]
+        transformed_encodings = [transformer_framework.forward(combined_encodings[i], sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(combined_encodings))]
 
 
-            transfoxl_embs, transfoxl_sep_embs, transfoxl_cont_embs = [list(group) for group in list(zip(*transformed_encodings))]
-            transfoxl_context_sentences = []
-            for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
-                context = elem[3:]
-                transfoxl_context_sentences.append(context)
-            attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
-            fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
-            inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
-                                    for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors, padded_masks)]
-        
-            attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
-        
-            predictions = [classification_head(vectors) for vectors in attended_sentence_output]
-            logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
-            padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
-            padded_labels = padded_labels.to(DEVICE)
-            padded_logits = padded_logits.to(DEVICE)
-            loss = criterion(padded_logits, padded_labels)
-            # loss.backward()
-            optimizer.step()
+        transfoxl_embs, transfoxl_sep_embs, transfoxl_cont_embs = [list(group) for group in list(zip(*transformed_encodings))]
+        transfoxl_context_sentences = []
+        for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
+            context = elem[3:]
+            transfoxl_context_sentences.append(context)
+        attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
+        fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
+        inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
+                                for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors, padded_masks)]
+    
+        attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
+    
+        predictions = [classification_head(vectors) for vectors in attended_sentence_output]
+        logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
+        padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
+        padded_labels = padded_labels.to(DEVICE)
+        padded_logits = padded_logits.to(DEVICE)
+        loss = criterion(padded_logits, padded_labels)
+        loss.backward()
+        optimizer.step()
 
-            total_loss += loss.item()
+        total_loss += loss.item()
 
-            # Compute accuracy
-            # predictions = torch.argmax(torch.cat(logits), dim=1)
-            # correct_predictions += (predictions == labels).sum().item()
-            accuracy_sample += calc_accuracy(padded_logits, padded_labels)
-            # f1_score_sample += f1_score_per_sample(padded_logits, padded_labels)
+        # Compute accuracy
+        # predictions = torch.argmax(torch.cat(logits), dim=1)
+        # correct_predictions += (predictions == labels).sum().item()
+        accuracy_sample += calc_accuracy(padded_logits, padded_labels)
+        # f1_score_sample += f1_score_per_sample(padded_logits, padded_labels)
 
-            del encodings
-            del xlnet_encodings
-            del sep
-            del sep_pos
-            del cont
-            del cont_pos
-            del transformed_encodings
-            del transfoxl_embs
-            del transfoxl_sep_embs
-            del transfoxl_cont_embs
-            del transfoxl_context_sentences
-            del attn_context_sentences
-            del fl_sentence_vectors
-            del padded_masks
-            del inter_attended_sentences
-            del attended_sentence_output
-            del inter_sentence_attention_weights
-            del predictions
-            del padded_logits
-            del padded_labels
-            del loss
-            del texts
-            del labels
-            del imgs
+        del encodings
+        del xlnet_encodings
+        del sep
+        del sep_pos
+        del cont
+        del cont_pos
+        del transformed_encodings
+        del transfoxl_embs
+        del transfoxl_sep_embs
+        del transfoxl_cont_embs
+        del transfoxl_context_sentences
+        del attn_context_sentences
+        del fl_sentence_vectors
+        del padded_masks
+        del inter_attended_sentences
+        del attended_sentence_output
+        del inter_sentence_attention_weights
+        del predictions
+        del padded_logits
+        del padded_labels
+        del loss
 
-            gc.collect()
-            torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
     gc.collect()
@@ -790,12 +714,12 @@ QID_q_context = pd.read_pickle('QID_q_context.pkl')
 context_qa_list = pd.read_pickle('context_qa_list.pkl')
 QID_q_int_type_cont = pd.read_pickle('QID_q_int_type_cont.pkl')
 img_emb = pd.read_pickle('image_embeddings.pkl')
-    
+
 for key, value in img_emb.items():
     if len(value) > 1:
         img_emb[key] = torch.mean(torch.stack(value), dim=0)
-    # elif len(value) == 0:
-    #     img_emb[key] = [torch.ones((1, 768))] #white_image_tensor
+    elif len(value) == 0:
+        img_emb[key] = [torch.ones((1, 768))] #white_image_tensor
 # --------------------------------- STEP 1 -------------------------------------------
 ''' Create encodings by passing the text through XLNet. Record the positions of the
     seperaters and each element of the input, i.e, question, intent, type and each
@@ -818,12 +742,10 @@ embedding_dim = 1024 # This is the embeddings dimension of each of transfoxl_emb
 hidden_size = 512
 image_size = 768
 
-num = 100
+num = 15
 labels = []
 corr_context = list(QID_context.values())[:num]
 corr_ans = list(QID_ans.values())[:num]
-# corr_context = list(QID_context.values())
-# corr_ans = list(QID_ans.values())
 for i in range(len(corr_context)):
   context_sent = corr_context[i].split('.')
   ans_sent = corr_ans[i].split('.')
@@ -834,20 +756,10 @@ for i in range(len(corr_context)):
 
 combined_texts = list(QID_q_int_type_cont.values())[:num]
 images = list(img_emb.values())[:num]
-
-# combined_texts = list(QID_q_int_type_cont.values())
-# images = list(img_emb.values())
-
-conv_images = []
-for img in tqdm(images):
-    if len(img) > 0:
-        conv_images.append(convert_img_shape(img[0].to(DEVICE), image_size, embedding_dim))
-    else:
-        # print(img)
-        conv_images.append(torch.tensor(img))
+images = [convert_img_shape(img[0], image_size, embedding_dim) for img in tqdm(images)]
 
 # Split the data
-train_texts, temp_texts, train_img, temp_img, train_labels, temp_labels = train_test_split(combined_texts,conv_images, labels, test_size=0.3, random_state=42)
+train_texts, temp_texts, train_img, temp_img, train_labels, temp_labels = train_test_split(combined_texts,images, labels, test_size=0.3, random_state=42)
 valid_texts, test_texts, valid_img, test_img, valid_labels, test_labels = train_test_split(temp_texts,temp_img, temp_labels, test_size=0.5, random_state=42)
 
 print(f"Training set: {len(train_texts)} examples")
@@ -859,10 +771,9 @@ train_dataset = CustomDataset(train_texts, train_img, train_labels)
 valid_dataset = CustomDataset(valid_texts, valid_img, valid_labels)
 test_dataset = CustomDataset(test_texts, test_img, test_labels)
 
-batch_size = 4
-train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
-valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
+train_loader = DataLoader(train_dataset, batch_size=2, collate_fn=collate_fn, shuffle=True)
+valid_loader = DataLoader(valid_dataset, batch_size=2, collate_fn=collate_fn, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn, shuffle=False)
 
 gc.collect()
 
@@ -879,7 +790,7 @@ model = torch.nn.ModuleList([
     inter_sentence_attention_layer, 
     classification_head
 ])
-# model = torch.nn.DataParallel(model)  # Wrap your model for multi-GPU use
+model = torch.nn.DataParallel(model)  # Wrap your model for multi-GPU use
 model = model.to(DEVICE)
 criterion = nn.BCELoss()  # Binary Cross Entropy Loss
 optimizer = optim.Adam([
@@ -968,12 +879,11 @@ optimizer = optim.Adam([
     
 # Training loop
 file_path = "results.txt"
-EPOCHS = 3
-for epoch in tqdm(range(EPOCHS)):  # Number of epochs
+for epoch in tqdm(range(3)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
     valid_loss, valid_accuracy = evaluate_model(model, valid_loader, criterion)
 
-    print(f'Epoch {epoch+1}/{EPOCHS}')
+    print(f'Epoch {epoch+1}/{5}')
     print(f'Train Loss: {train_loss:.4f}')
     print(f'Validation Loss: {valid_loss:.4f}')
     print(f'Validation Accuracy: {valid_accuracy:.4f}')
