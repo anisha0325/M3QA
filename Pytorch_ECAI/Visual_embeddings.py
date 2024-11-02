@@ -7,6 +7,7 @@ from tqdm import tqdm
 import pandas as pd
 import pickle
 import pillow_avif
+import ast
 
 warnings.filterwarnings("ignore", message="xFormers is not available")
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -97,12 +98,11 @@ def save_embeddings(embeddings, output_file):
 
 # Example usage
 if __name__ == "__main__":
-    csv_file = "Dataset/question_image_dict.csv"  # Path to your CSV file
+    csv_file = "question_image_dict.csv"  # Path to your CSV file
     output_file = "full_image_embeddings.pkl"  # Path to save the image embeddings
 
     # Extract embeddings
     embeddings = extract_embeddings(csv_file)
-
     # Save the embeddings
     save_embeddings(embeddings, output_file)
 
