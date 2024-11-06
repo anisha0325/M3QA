@@ -18,3 +18,5 @@ image_embeddings.pkl
 *.log
 *.txt
 *.out
+*.csv
+Pytorch_ECAI/question_image_dict.pkl
