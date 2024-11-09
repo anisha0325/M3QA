@@ -7,6 +7,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch import nn
 from transformers import XLNetTokenizer, XLNetModel, TransfoXLModel
 from transformers import BertTokenizer, BertModel
+from transformers import LongformerTokenizer, LongformerModel
 import torch.optim as optim
 import pandas as pd
 from tqdm import tqdm
@@ -80,11 +81,17 @@ def create_labels(context_sentences, answer_sentences):
 #         super(EncodingFramework, self).__init__()
 #         self.tokenizer = XLNetTokenizer.from_pretrained(model_name)
 #         self.model = XLNetModel.from_pretrained(model_name)
+# class EncodingFramework(nn.Module):
+#     def __init__(self, model_name='bert-large-cased'):
+#         super(EncodingFramework, self).__init__()
+#         self.tokenizer = BertTokenizer.from_pretrained(model_name)
+#         self.model = BertModel.from_pretrained(model_name)
+
 class EncodingFramework(nn.Module):
-    def __init__(self, model_name='bert-large-cased'):
+    def __init__(self, model_name='allenai/longformer-base-4096'):
         super(EncodingFramework, self).__init__()
-        self.tokenizer = BertTokenizer.from_pretrained(model_name)
-        self.model = BertModel.from_pretrained(model_name)
+        self.tokenizer = LongformerTokenizer.from_pretrained(model_name)
+        self.model = LongformerModel.from_pretrained(model_name)
     
     def forward(self, text):
         # Tokenize the input while keeping special tokens intact
@@ -93,7 +100,7 @@ class EncodingFramework(nn.Module):
         # print("1")
         # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
         # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-        tokens = self.tokenizer(text, add_special_tokens=True, return_tensors="pt",max_length=512,truncation=True,padding='max_length')
+        tokens = self.tokenizer(text, add_special_tokens=True, return_tensors="pt",max_length=2200,truncation=True,padding='max_length')
         token_cls = self.tokenizer("[CLS]", add_special_tokens = True, return_tensors = "pt")
 
         # Get tokenized IDs

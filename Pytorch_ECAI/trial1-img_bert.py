@@ -7,6 +7,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch import nn
 from transformers import XLNetTokenizer, XLNetModel, TransfoXLModel
 from transformers import BertTokenizer, BertModel
+from transformers import LongformerTokenizer, LongformerModel
 import torch.optim as optim
 import pandas as pd
 from tqdm import tqdm
@@ -80,12 +81,17 @@ def create_labels(context_sentences, answer_sentences):
 #         self.tokenizer = XLNetTokenizer.from_pretrained(model_name)
 #         self.model = XLNetModel.from_pretrained(model_name)
 
-class EncodingFramework(nn.Module):
-    def __init__(self, model_name='bert-large-cased'):
-        super(EncodingFramework, self).__init__()
-        self.tokenizer = BertTokenizer.from_pretrained(model_name)
-        self.model = BertModel.from_pretrained(model_name)
+# class EncodingFramework(nn.Module):
+#     def __init__(self, model_name='bert-large-cased'):
+#         super(EncodingFramework, self).__init__()
+#         self.tokenizer = BertTokenizer.from_pretrained(model_name)
+#         self.model = BertModel.from_pretrained(model_name)
         
+class EncodingFramework(nn.Module):
+    def __init__(self, model_name='allenai/longformer-base-4096'):
+        super(EncodingFramework, self).__init__()
+        self.tokenizer = LongformerTokenizer.from_pretrained(model_name)
+        self.model = LongformerModel.from_pretrained(model_name)
     def forward(self, text):
         # Tokenize the input while keeping special tokens intact
         self.tokenizer.add_special_tokens({'additional_special_tokens': ['[CSEP]', '[SEP]', '[CLS]']})

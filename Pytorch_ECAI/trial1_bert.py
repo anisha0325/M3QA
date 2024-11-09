@@ -7,6 +7,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch import nn
 from transformers import XLNetTokenizer, XLNetModel, TransfoXLModel
 from transformers import BertTokenizer, BertModel
+from transformers import LongformerTokenizer, LongformerModel
 import torch.optim as optim
 import pandas as pd
 from tqdm import tqdm
@@ -84,39 +85,45 @@ def create_labels(context_sentences, answer_sentences):
 #         super(EncodingFramework, self).__init__()
 #         self.tokenizer = XLNetTokenizer.from_pretrained(model_name)
 #         self.model = XLNetModel.from_pretrained(model_name)
+
+# class EncodingFramework(nn.Module):
+#     def __init__(self, model_name='bert-large-cased'):
+#         super(EncodingFramework, self).__init__()
+#         self.tokenizer = BertTokenizer.from_pretrained(model_name)
+#         self.model = BertModel.from_pretrained(model_name)
+
 class EncodingFramework(nn.Module):
-    def __init__(self, model_name='bert-large-cased'):
+    def __init__(self, model_name='allenai/longformer-base-4096'):
         super(EncodingFramework, self).__init__()
-        self.tokenizer = BertTokenizer.from_pretrained(model_name)
-        self.model = BertModel.from_pretrained(model_name)
+        self.tokenizer = LongformerTokenizer.from_pretrained(model_name)
+        self.model = LongformerModel.from_pretrained(model_name)
 
     def forward(self, text):
         # Tokenize the input while keeping special tokens intact
         self.tokenizer.add_special_tokens({'additional_special_tokens': ['[CSEP]', '[SEP]', '[CLS]']})
         self.model.resize_token_embeddings(len(self.tokenizer))
 
-        tokens = self.tokenizer(text, add_special_tokens=True, return_tensors="pt",max_length=512,truncation=True,padding='max_length')
-        # print(tokens['input_ids'].shape)
+        # tokens = self.tokenizer(text, add_special_tokens=True, return_tensors="pt",max_length=2200,truncation=True,padding='max_length')
         # Get tokenized IDs
-        input_ids = tokens['input_ids']#[:,:512]
-        # print(f"Token IDs: {input_ids}")
-        # Pass the tokenized input through the XLNet model to get the embeddings
+        # input_ids = tokens['input_ids']#[:,:512]
+        # input_ids = input_ids.to(DEVICE)
+
+        tokens=self.tokenizer(text,add_special_tokens=True,return_tensors='pt',max_length=512,truncation=False)
+        input_ids = tokens['input_ids'].squeeze().to(DEVICE)
         input_ids = input_ids.to(DEVICE)
-        # print("Before Processing:")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-        # with torch.no_grad():
-        outputs = self.model(input_ids=input_ids)
-        # print('0.3')
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-        # Get the token embeddings (output hidden states)
+        chunks = [input_ids[i:i+500] for i in range(0, len(input_ids), 400) if i+500 <= len(input_ids)]
+        # Encode each chunk separately
+        chunk_embeddings = []
+        for chunk in chunks:
+            chunk_outputs = self.model(input_ids=chunk.unsqueeze(0))
+            chunk_embeddings.append(chunk_outputs.last_hidden_state)
+        # Combine chunk embeddings as needed
+        outputs = torch.cat(chunk_embeddings, dim=1)  # Concatenate or apply pooling as needed
+
+        # outputs = self.model(input_ids=input_ids)
 
         token_embeddings = outputs.last_hidden_state.detach().cpu()
-        # print(token_embeddings.device)
-        # print('1')
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
+
         # Define separator tokens
         separators = ["[SEP]", "[CSEP]", "[CLS]"]
         separator_ids = self.tokenizer.convert_tokens_to_ids(separators)
@@ -151,32 +158,6 @@ class EncodingFramework(nn.Module):
                     positions.append(pos[0])
             content_positions.append(positions)
             # print(positions)
-
-        # # Extract the embeddings for each separator token
-        # separator_embeddings = {}
-        # for sep in separators:
-        #     positions = separator_positions[sep]
-        #     embeddings = [token_embeddings[0, pos, :] for pos in positions] if positions else []
-        #     separator_embeddings[sep] = embeddings
-
-        # # Extract the embeddings for each content part (separately)
-        # content_embeddings = []
-        # for positions in content_positions:
-        #     content_part_embeddings = [token_embeddings[:, pos, :] for pos in positions]
-        #     content_embeddings.append(content_part_embeddings)
-
-        # # Print out positions and shapes of embeddings for separator tokens
-        # for sep in separators:
-        #     positions = separator_positions[sep]
-        #     embeddings = separator_embeddings[sep]
-        #     for i, embedding in enumerate(embeddings):
-        #         print(f"Position of '{sep}': {positions[i]}, Embedding shape: {embedding.shape}")
-
-        # # Print out positions and shapes of embeddings for each content part
-        # for i, (positions, embeddings) in enumerate(zip(content_positions, content_embeddings)):
-        #     print(f"Content part {i+1} positions: {positions}")
-        #     for j, embedding in enumerate(embeddings):
-        #         print(f"  Token {j+1} at position {positions[j]}: Embedding shape: {embedding.shape}")
         del input_ids
         del outputs
         del tokens
@@ -249,15 +230,7 @@ class TransformerXLFramework(nn.Module):
 
 
     def forward(self, encodings, separators, separator_positions, contents, content_positions):
-        # print("Inside TransformerXLFramework")
-        # # Transformer-XL expects input in 2D format, so we reshape the embeddings accordingly
-        # transformer_xl_output = self.model(inputs_embeds=encodings)
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
 
-        # # Get the token embeddings from Transformer-XL output
-        # transformer_xl_embeddings = transformer_xl_output.last_hidden_state
-        # print(encodings.shape)
         total_len = encodings.size(1)
         transformer_xl_embeddings = []
         memory = None  # Initialize memory to None for the first segment
@@ -265,11 +238,7 @@ class TransformerXLFramework(nn.Module):
         # print(total_len)
         # Process each encoding in chunks
         for i in range(0, total_len, chunk_size):
-            # print()
-            # print(i)
-            # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-            # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-            # Extract chunk of input
+
             chunk_encodings = encodings[:, i:i + chunk_size].to(DEVICE)  # Move chunk to GPU
 
             # Pass chunk through Transformer-XL, along with memory from the previous chunk
@@ -299,20 +268,7 @@ class TransformerXLFramework(nn.Module):
         for positions in content_positions:
             content_part_embeddings = [transformer_xl_embeddings[0, pos, :] for pos in positions]
             content_embeddings_xl.append(content_part_embeddings)
-
-        # # Print out positions and shapes of embeddings for separator tokens from Transformer-XL
-        # for sep in separators:
-        #     positions = separator_positions[sep]
-        #     embeddings = separator_embeddings_xl[sep]
-        #     for i, embedding in enumerate(embeddings):
-        #         print(f"Position of '{sep}' in Transformer-XL: {positions[i]}, Embedding shape: {embedding.shape}")
-
-        # # Print out positions and shapes of embeddings for each content part from Transformer-XL
-        # for i, (positions, embeddings) in enumerate(zip(content_positions, content_embeddings_xl)):
-        #     print(f"Content part {i+1} positions in Transformer-XL: {positions}")
-        #     for j, embedding in enumerate(embeddings):
-        #         print(f"  Token {j+1} at position {positions[j]}: Embedding shape: {embedding.shape}")
-
+        
         del encodings
         del separators
         del content_positions
@@ -610,53 +566,29 @@ def train_model(model, train_loader, criterion, optimizer):
     c, num_excl = 0, 0
     for texts, labels in tqdm(train_loader):
         optimizer.zero_grad()
-        # print("START")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
         # Forward pass
         encodings = [framework.forward(text) for text in texts]
-        # print("After EncodingFramework")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
         xlnet_encodings, sep, sep_pos, cont, cont_pos = zip(*encodings) #[list(group) for group in list(zip(*encodings))]
-        # for enc in xlnet_encodings:
-        #     check_mem(enc)
-        # xlnet_encodings_cpu = [elem.to('cpu') for elem in xlnet_encodings]
         del encodings
         gc.collect()
-        # torch.cuda.empty_cache()
-        # print(xlnet_encodings_cpu[0].device)
-        # print(type(sep[0]))
         transformed_encodings = [transformer_framework.forward(xlnet_encodings[i].to(DEVICE), sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(xlnet_encodings))]
         transfoxl_embs, transfoxl_sep_embs, transfoxl_cont_embs = [list(group) for group in list(zip(*transformed_encodings))]
         transfoxl_context_sentences = []
         for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
             context = elem[3:]
             transfoxl_context_sentences.append(context)
-        # print("After TrandformerXL")
-        # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-        # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
         attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
         fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
-        # fl_sentence_vectors_cls, padded_masks_cls = attended_sentence_cls(fl_sentence_vectors, transfoxl_sep_embs, padded_masks)
         fl_sentence_vectors_cls= attended_sentence_cls(fl_sentence_vectors, transfoxl_sep_embs, padded_masks)
         if len(fl_sentence_vectors_cls) == batch_size:
-            # inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
-            #                         for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors_cls, padded_masks_cls)]
             inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
                                     for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors_cls, padded_masks)]
             attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
-            # print("After Attentions")
-            # print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated() / (1024**2)} MB")
-            # print(f"Initial GPU memory reserved: {torch.cuda.memory_reserved() / (1024**2)} MB")
-            # print("END of Iter")
             predictions = [classification_head(vectors) for vectors in attended_sentence_output]
             logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
             padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
-            # print(padded_logits)
-            # print(padded_labels)
             loss = criterion(padded_logits, padded_labels)
             loss.backward()
             optimizer.step()
@@ -778,20 +710,6 @@ def evaluate_model(model, valid_loader, criterion):
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
     return total_loss / (len(valid_loader) - num_excl), accuracy_sample / (len(valid_loader) - num_excl)
 
-# # Step 2: F1 Score Calculation (multi-label, per sample)
-# def f1_score_per_sample(preds, labels):
-#     preds_np = preds.detach().numpy()  # Convert tensors to NumPy arrays
-#     labels_np = labels.detach().numpy()
-    
-#     # Calculate F1 score for each list of predictions and true labels
-#     f1_scores = []
-#     for pred, true in zip(preds_np, labels_np):
-#         f1 = f1_score(true, pred, average='binary')  # Binary F1 score for each list
-#         f1_scores.append(f1)
-        
-#     return f1_scores
-
-
 '''
 context_qa_list: 
     -type: list
@@ -830,18 +748,6 @@ QID_q_int_type_cont = pd.read_pickle('QID_q_int_type_cont.pkl')
     seperaters and each element of the input, i.e, question, intent, type and each
     individual sentence of context separately
 '''
-
-
-# Create dictionary QID_q_int_type_cont
-# QID_q_int_type_cont = dict()
-
-# for key, value in tqdm(QID_context.items()):
-#     converted_context = convert_context(value)
-#     QID_q_int_type_cont[key] = QID_ques[key] + converted_context
-
-# with open('QID_q_int_type_cont.pkl', 'wb') as file:
-#     pickle.dump(QID_q_int_type_cont, file)
-
 
 
 # num = len(list(QID_context.values()))
@@ -931,68 +837,6 @@ optimizer = optim.Adam([
             With:
             pos_seq = torch.arange(klen - 1, -1, -1.0, device=word_emb.device, dtype=torch.int64).type_as(word_emb)
 '''
-
-# a, b, c, = framework.forward(train_texts[0])
-# for texts, labels in train_loader:
-#     # Forward pass
-
-#     ''' 
-#     len(encodings) = batch_size
-#     len(encodings[0]) = 5 (retuns 5 elements)
-#     encodings[0][0].shape = torch.Size([1, 936, 1024]) - last_hidden_state
-#     encodings[0][1] = position of seperaters
-#     encodings[0][2] = encodings of seperators
-#     encoding[0][3] = position of content entities.
-#     encodings[0][4] = encodings of content entities
-#     Segregating this list in the form [enc1, enc2,...encn], [sep1,...,sepn], 
-#     [pos_sep1,...,pos_sepn], [cont1,...,contn], [pos_cont1,...,post_contn]
-
-#     '''
-#     encodings = [framework.forward(text) for text in texts]
-#     xlnet_encodings, sep, sep_pos, cont, cont_pos = [list(group) for group in list(zip(*encodings))]
-
-#     ''' 
-#     len(transformed_encodings) = batch_size
-#     len(transformed_encodings[0]) = 3
-#     transformed_encodings[0][0].shape = torch.Size([1, 936, 1024]) - last_hidden_state
-#     transformed_encodings[0][1] = embeddings of seperaters from transformer-xl
-#     transformed_encodings[0][2] = embeddings of content entities from transformer-xl
-#     Segregating this list in the form [enc1, enc2,...encn], [sep1,...,sepn], 
-#     [pos_sep1,...,pos_sepn], [cont1,...,contn], [pos_cont1,...,post_contn]
-
-#     len(transfoxl_cont_embs) = 2 (batch_size)
-#     transfoxl_cont_embs[i] = Represents each of question, intent, type, context sentences respectively
-#     transfoxl_cont_embs[i][0] = question
-#     transfoxl_cont_embs[i][1] = intent
-#     transfoxl_cont_embs[i][2] = type
-#     transfoxl_cont_embs[i][3] to transfoxl_cont_embs[i][n] = Each represent a context sentence
-    
-#     '''
-
-#     transformed_encodings = [transformer_framework.forward(xlnet_encodings[i], sep[i], sep_pos[i], cont[i], cont_pos[i]) for i in range(len(xlnet_encodings))]
-#     transfoxl_embs, transfoxl_sep_embs, transfoxl_cont_embs = [list(group) for group in list(zip(*transformed_encodings))]
-#     transfoxl_context_sentences = []
-#     for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
-#         context = elem[3:]
-#         transfoxl_context_sentences.append(context)
-#     attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
-#     fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
-#     inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
-#                                 for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors, padded_masks)]
-    
-#     attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
-#     predictions = [classification_head(elem) for elem in attended_sentence_output]
-#     binary_predictions = [(pred> 0.5).float() for pred in predictions]
-#     # breakpoint()
-    
-
-# wandb.login()
-# wandb.init(project='MEDQA',)
-# wandb.config = {
-#   "learning_rate": 1e-5,
-#   "epochs": 10,
-#   "batch_size": 4
-# }
 
 # Training loop
 file_path = "trial1-1000-25.txt"
