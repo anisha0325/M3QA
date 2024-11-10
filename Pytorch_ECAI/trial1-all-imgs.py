@@ -24,7 +24,7 @@ from Visual_embeddings import create_vis_embs
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 #os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"]="2"
+os.environ["CUDA_VISIBLE_DEVICES"]="6"
 
 def set_random_seed(seed: int):
     """

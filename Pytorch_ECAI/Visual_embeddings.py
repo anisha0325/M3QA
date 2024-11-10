@@ -10,7 +10,7 @@ import pillow_avif
 import ast
 
 warnings.filterwarnings("ignore", message="xFormers is not available")
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cuda:6" if torch.cuda.is_available() else "cpu"
 
 # Load pre-trained ViT-B/16 model with DINO weights from torch hub
 def load_vit_dino():
@@ -87,7 +87,7 @@ def extract_embeddings(csv_file):
             if os.path.exists(image_path):
                 embedding = get_image_embedding(model, image_path)
                 if embedding is not None:
-                    image_embeddings[question_id].append(embedding)
+                    image_embeddings[question_id].append(embedding.cpu())
 
     return image_embeddings
 

@@ -26,7 +26,7 @@ from Visual_embeddings import create_vis_embs
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 #os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"]="2"
+os.environ["CUDA_VISIBLE_DEVICES"]="6"
 
 def set_random_seed(seed: int):
     """
@@ -897,7 +897,7 @@ embedding_dim = 1024 # This is the embeddings dimension of each of transfoxl_emb
 hidden_size = 512
 image_size = 1024
 
-num = 500
+num = 1000
 labels = []
 corr_context = list(QID_context.values())[:num]
 corr_ans = list(QID_ans.values())[:num]
@@ -1061,8 +1061,8 @@ optimizer = optim.Adam([
 # }
 
 # Training loop
-file_path = "trial1-all-imgs-500.txt"
-EPOCHS = 5
+file_path = "trial1-all-imgs_longformer-1000.txt"
+EPOCHS = 25
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
     valid_loss, valid_accuracy = evaluate_model(model, valid_loader, criterion)
