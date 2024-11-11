@@ -16,9 +16,16 @@ from entmax import sparsemax, entmax15
 import os
 import numpy as np
 import warnings
-import gc
 import pickle
 import sys #,wandb
+
+print(torch.cuda.is_available())
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda:0")
+    print("Using GPU")
+else:
+    DEVICE = torch.device("cpu")
+    print("Using CPU")
 
 def set_random_seed(seed: int):
     """
@@ -45,7 +52,6 @@ def convert_context(context):
     sentences = re.split(r'\.\s*', context)
     sentences = [sentence.strip() for sentence in sentences if sentence]
     csep_sentences = ' [SEP] ' + ' [CSEP] '.join(sentences) #change
-    gc.collect()
     return csep_sentences
 
 def create_labels(context_sentences, answer_sentences):
@@ -64,7 +70,6 @@ def collate_fn(batch):
     labels_padded = torch.full((len(labels), max_label_length), fill_value=0, dtype=torch.long)  # Using -1 as padding value
     for i, label in enumerate(labels):
         labels_padded[i, :len(label)] = torch.tensor(label, dtype=torch.long)
-    gc.collect()
     return texts, img, labels_padded
 
 # Function to apply mean pooling and handle padding for a single sentence
@@ -93,10 +98,6 @@ def mean_pooling(sequence_output, attention_mask, max_sequence_length):
         else:
             mean_pooled_output[i] = torch.zeros(padded_sentence.size(1), device=padded_sentence.device)  # Zero padding
 
-    del padded_sentence
-    
-    gc.collect()
-    torch.cuda.empty_cache()
     return mean_pooled_output, padded_mask  # Shape: (max_seq_len, embedding_dim)
 
 
@@ -124,11 +125,6 @@ def apply_self_attention(context_sentences_emb_list, self_attention_layer):
         except:
             pass
 
-    del transfoxl_attention_masks
-    del context_sentences_emb_list
-
-    gc.collect()
-    torch.cuda.empty_cache()
     return torch.stack(fixed_length_sentence_vectors), torch.stack(padded_masks)
 
 
@@ -144,11 +140,6 @@ def convert_tensor(tensor_list):
     # Fill in the values from each tensor into the result matrix
     for i, tensor in enumerate(flattened_tensors):
         result[i, :len(tensor)] = tensor
-
-    del flattened_tensors
-
-    gc.collect()
-    torch.cuda.empty_cache()
     return result
 
 
@@ -177,11 +168,6 @@ def pad_tensor_lists(tensor_list1, tensor_list2):
         padded_list1.append(t1.clone().detach().requires_grad_(True))
         padded_list2.append(t2.clone().detach().requires_grad_(True))
 
-    del tensor_list1
-    del tensor_list2
-
-    gc.collect()
-    torch.cuda.empty_cache()
     return torch.stack(padded_list1), torch.stack(padded_list2)
 
 
@@ -189,7 +175,6 @@ def pad_tensor_lists(tensor_list1, tensor_list2):
 def calc_accuracy(preds, labels):
     correct = torch.eq(preds, labels).sum().item()  # Count correct predictions
     total = torch.numel(labels)  # Total number of elements in the labels tensor
-    gc.collect()
     return correct / total
 
 def log_epoch_info(file_path, epoch_num, train_loss, valid_loss, valid_accuracy):
@@ -232,10 +217,5 @@ def attended_sentence_cls(self_attended_sentence_vectors, transfoxl_sep_embs, ma
         result = torch.cat((tensor_a, tensor_b_expanded), dim=-1)
         new_vec.append(linear_layer(result))
 
-
-        del tensor_a
-        del tensor_b
-        del tensor_b_expanded
-        del result
     print(len(new_vec))
     return new_vec

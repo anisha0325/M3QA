@@ -10,7 +10,7 @@ import pillow_avif
 import ast
 
 warnings.filterwarnings("ignore", message="xFormers is not available")
-device = "cuda:6" if torch.cuda.is_available() else "cpu"
+device = "cuda:4" if torch.cuda.is_available() else "cpu"
 
 # Load pre-trained ViT-B/16 model with DINO weights from torch hub
 def load_vit_dino():
@@ -61,7 +61,8 @@ def load_image_paths_from_csv(csv_file):
     # Group image paths by question_id
     for _, row in data.iterrows():
         question_id = row['question_id']
-        image_path = row['image_path']
+        image_path = ast.literal_eval(row['image_path']) #change
+        # print(image_path)
 
         if question_id not in question_image_dict:
             question_image_dict[question_id] = []
@@ -82,13 +83,14 @@ def extract_embeddings(csv_file):
 
     # Process each question_id and corresponding image paths
     for question_id, image_paths in tqdm(question_image_dict.items(), desc="Processing question IDs", leave=True):
+        image_paths = image_paths[0] #change
         image_embeddings[question_id] = []
         for image_path in tqdm(image_paths, desc=f"Processing images for question {question_id}", leave=False):
             if os.path.exists(image_path):
                 embedding = get_image_embedding(model, image_path)
                 if embedding is not None:
-                    image_embeddings[question_id].append(embedding.cpu())
-
+                    image_embeddings[question_id].append(embedding)
+        # print(image_embeddings)
     return image_embeddings
 
 # Save the embeddings to a pickle file
@@ -97,13 +99,25 @@ def save_embeddings(embeddings, output_file):
         pickle.dump(embeddings, f)
 
 # Example usage
-if __name__ == "__main__":
-    csv_file = "question_image_dict.csv"  # Path to your CSV file
+# if __name__ == "__main__":
+#     csv_file = "Dataset/question_image_dict.csv"  # Path to your CSV file
+#     output_file = "full_image_embeddings.pkl"  # Path to save the image embeddings
+
+#     # Extract embeddings
+#     embeddings = extract_embeddings(csv_file)
+#     # Save the embeddings
+#     save_embeddings(embeddings, output_file)
+
+#     print("Embeddings successfully extracted and saved.")
+
+def create_vis_embs(input_file):
+    # csv_file = "Dataset/question_image_dict.csv"  # Path to your CSV file
     output_file = "full_image_embeddings.pkl"  # Path to save the image embeddings
 
     # Extract embeddings
-    embeddings = extract_embeddings(csv_file)
+    embeddings = extract_embeddings(input_file)
     # Save the embeddings
     save_embeddings(embeddings, output_file)
 
     print("Embeddings successfully extracted and saved.")
+    return embeddings
