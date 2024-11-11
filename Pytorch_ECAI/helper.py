@@ -217,5 +217,5 @@ def attended_sentence_cls(self_attended_sentence_vectors, transfoxl_sep_embs, ma
         result = torch.cat((tensor_a, tensor_b_expanded), dim=-1)
         new_vec.append(linear_layer(result))
 
-    print(len(new_vec))
+    # print(len(new_vec))
     return new_vec
