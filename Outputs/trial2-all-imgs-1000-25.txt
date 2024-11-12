@@ -1,0 +1,5 @@
+Epoch: 0, Train_loss: 65.0844, Valid_loss: 62.2334, Valid_accuracy: 0.38%
+Epoch: 1, Train_loss: 64.9201, Valid_loss: 62.2334, Valid_accuracy: 0.38%
+Epoch: 2, Train_loss: 64.6486, Valid_loss: 62.2334, Valid_accuracy: 0.38%
+Epoch: 3, Train_loss: 64.9940, Valid_loss: 62.2334, Valid_accuracy: 0.38%
+Epoch: 4, Train_loss: 63.9281, Valid_loss: 62.2334, Valid_accuracy: 0.38%
