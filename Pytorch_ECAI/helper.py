@@ -16,16 +16,9 @@ from entmax import sparsemax, entmax15
 import os
 import numpy as np
 import warnings
+import gc
 import pickle
 import sys #,wandb
-
-print(torch.cuda.is_available())
-if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:0")
-    print("Using GPU")
-else:
-    DEVICE = torch.device("cpu")
-    print("Using CPU")
 
 def set_random_seed(seed: int):
     """
@@ -52,6 +45,7 @@ def convert_context(context):
     sentences = re.split(r'\.\s*', context)
     sentences = [sentence.strip() for sentence in sentences if sentence]
     csep_sentences = ' [SEP] ' + ' [CSEP] '.join(sentences) #change
+    gc.collect()
     return csep_sentences
 
 def create_labels(context_sentences, answer_sentences):
@@ -59,9 +53,9 @@ def create_labels(context_sentences, answer_sentences):
     labels = [1 if sentence in answer_sentences else 0 for sentence in context_sentences]
     return labels
 
-# Define collate function
-def collate_fn(batch):
+def collate_fn_3(batch):
     texts, img, labels = zip(*batch)
+    # texts_padded = pad_sequence(texts, batch_first=True, padding_value=tokenizer.pad_token_id)
 
     # Determine the maximum length of labels in the batch
     max_label_length = max(len(label) for label in labels)
@@ -70,7 +64,25 @@ def collate_fn(batch):
     labels_padded = torch.full((len(labels), max_label_length), fill_value=0, dtype=torch.long)  # Using -1 as padding value
     for i, label in enumerate(labels):
         labels_padded[i, :len(label)] = torch.tensor(label, dtype=torch.long)
+    gc.collect()
     return texts, img, labels_padded
+
+# Define collate function
+def collate_fn(batch):
+    texts, img, labels, img_labels = zip(*batch)
+
+    # Determine the maximum length of labels in the batch
+    max_label_length = max(len(label) for label in labels)
+    max_img_label_length = max(len(label) for label in img_labels)
+    # Pad labels
+    labels_padded = torch.full((len(labels), max_label_length), fill_value=0, dtype=torch.long)  # Using -1 as padding value
+    img_labels_padded = torch.full((len(img_labels), max_img_label_length), fill_value=0, dtype=torch.long)
+    for i, label in enumerate(labels):
+        labels_padded[i, :len(label)] = torch.tensor(label, dtype=torch.long)
+    for i, label in enumerate(img_labels):
+        img_labels_padded[i, :len(label)] = torch.tensor(label, dtype=torch.long)
+    gc.collect()
+    return texts, img, labels_padded, img_labels_padded
 
 # Function to apply mean pooling and handle padding for a single sentence
 def mean_pooling(sequence_output, attention_mask, max_sequence_length):
@@ -98,34 +110,46 @@ def mean_pooling(sequence_output, attention_mask, max_sequence_length):
         else:
             mean_pooled_output[i] = torch.zeros(padded_sentence.size(1), device=padded_sentence.device)  # Zero padding
 
+    del padded_sentence
+    
+    gc.collect()
+    torch.cuda.empty_cache()
     return mean_pooled_output, padded_mask  # Shape: (max_seq_len, embedding_dim)
 
 
-def apply_self_attention(context_sentences_emb_list, self_attention_layer):
+def apply_self_attention(context_sentences_emb_list, self_attention_layer, DEVICE):
 
     # Assuming content_embeddings_xl contains the embeddings for c1, c2, c3, c4
     fixed_length_sentence_vectors = []
     padded_masks = []
     transfoxl_attention_masks = [torch.ones(len(content_embedding)) for content_embedding in context_sentences_emb_list]
-
+    # print(context_sentences_emb_list)
     # Step 1: Apply self-attention and mean pooling over each sentence embedding
-    max_seq_len = max([len(content_embedding) for content_embedding in context_sentences_emb_list])
-    for context_sentence, attention_mask in zip(context_sentences_emb_list, transfoxl_attention_masks):
-        try:
+    if len(context_sentences_emb_list) == 0:
+        return torch.tensor([]), torch.tensor([])
+    else:
+        max_seq_len = max([len(content_embedding) for content_embedding in context_sentences_emb_list])
+        for context_sentence, attention_mask in zip(context_sentences_emb_list, transfoxl_attention_masks):
             # print(len(context_sentence))
-            context_sentence_embedding_tensor = torch.stack(context_sentence).to(DEVICE)  # Shape: (seq_len, embedding_dim)
-            
-            # Apply self-attention over the encoded words of the sentence
-            attended_output = self_attention_layer(context_sentence_embedding_tensor.unsqueeze(0))  # Shape: (1, seq_len, embedding_dim)
-            
-            # Step 2: Apply mean pooling to obtain fixed-length sentence vector
-            pooled_output, padded_mask = mean_pooling(attended_output.squeeze(0), attention_mask, max_seq_len) 
-            fixed_length_sentence_vectors.append(pooled_output)
-            padded_masks.append(padded_mask)
-        except:
-            pass
-
-    return torch.stack(fixed_length_sentence_vectors), torch.stack(padded_masks)
+            try:
+                context_sentence_embedding_tensor = torch.stack(context_sentence).to(DEVICE)  # Shape: (seq_len, embedding_dim)
+                
+                # Apply self-attention over the encoded words of the sentence
+                attended_output = self_attention_layer(context_sentence_embedding_tensor.unsqueeze(0))  # Shape: (1, seq_len, embedding_dim)
+                
+                # Step 2: Apply mean pooling to obtain fixed-length sentence vector
+                pooled_output, padded_mask = mean_pooling(attended_output.squeeze(0), attention_mask, max_seq_len) 
+                # print(pooled_output.shape, padded_mask.shape)
+                fixed_length_sentence_vectors.append(pooled_output)
+                padded_masks.append(padded_mask)
+            except:
+                # print("Empty context sentence")
+                pass
+        del transfoxl_attention_masks
+        del context_sentences_emb_list
+        gc.collect()
+        torch.cuda.empty_cache()
+        return torch.stack(fixed_length_sentence_vectors), torch.stack(padded_masks)
 
 
 
@@ -140,6 +164,11 @@ def convert_tensor(tensor_list):
     # Fill in the values from each tensor into the result matrix
     for i, tensor in enumerate(flattened_tensors):
         result[i, :len(tensor)] = tensor
+
+    del flattened_tensors
+
+    gc.collect()
+    torch.cuda.empty_cache()
     return result
 
 
@@ -168,6 +197,11 @@ def pad_tensor_lists(tensor_list1, tensor_list2):
         padded_list1.append(t1.clone().detach().requires_grad_(True))
         padded_list2.append(t2.clone().detach().requires_grad_(True))
 
+    del tensor_list1
+    del tensor_list2
+
+    gc.collect()
+    torch.cuda.empty_cache()
     return torch.stack(padded_list1), torch.stack(padded_list2)
 
 
@@ -175,33 +209,42 @@ def pad_tensor_lists(tensor_list1, tensor_list2):
 def calc_accuracy(preds, labels):
     correct = torch.eq(preds, labels).sum().item()  # Count correct predictions
     total = torch.numel(labels)  # Total number of elements in the labels tensor
+    gc.collect()
     return correct / total
 
-def log_epoch_info(file_path, epoch_num, train_loss, valid_loss, valid_accuracy):
+def log_epoch_info_3(file_path, epoch_num, train_loss, valid_loss, valid_accuracy):
 
     # Open the file in append mode ('a') to keep adding lines without overwriting
     with open(file_path, 'a') as f:
-        f.write(f"Epoch: {epoch_num}, Train_loss: {train_loss:.4f}, Valid_loss: {valid_loss:.4f}, Valid_accuracy: {valid_accuracy:.2f}%\n")
+        f.write(f"Epoch: {epoch_num}, Train_loss: {train_loss:.4f}, Valid_loss: {valid_loss:.4f}, Valid_sentence_accuracy: {valid_accuracy:.4f}%\n")
 
-def convert_img_shape(img, image_size, embedding_size):
-    projection_layer = nn.Linear(image_size, embedding_size).to(DEVICE)  # Linear layer to project 768 to 1024
-    projected_image_encoding = projection_layer(img)  # Shape: [1, 1024]
+
+def log_epoch_info(file_path, epoch_num, train_loss, valid_loss, valid_accuracy, valid_img_accuracy):
+
+    # Open the file in append mode ('a') to keep adding lines without overwriting
+    with open(file_path, 'a') as f:
+        f.write(f"Epoch: {epoch_num}, Train_loss: {train_loss:.4f}, Valid_loss: {valid_loss:.4f}, Valid_sentence_accuracy: {valid_accuracy:.4f}, Valid_image_accuracy: {valid_img_accuracy:.4f}%\n")
+
+def convert_img_shape(img, image_size, embedding_size, DEVICE):
+    # projection_layer = nn.Linear(image_size, embedding_size).to(DEVICE)  # Linear layer to project 768 to 1024
+    # projected_image_encoding = projection_layer(img)  # Shape: [1, 1024]
     # Convert to shape [1, 1, 1024]
+    projected_image_encoding = img
     if projected_image_encoding.dim() == 1:  # If the tensor is [1024]
         projected_image_encoding = projected_image_encoding.unsqueeze(0).unsqueeze(0)  # Add two dimensions
     elif projected_image_encoding.dim() == 2:  # If the tensor is [1, 1024]
-        projected_image_encoding = projected_image_encoding.unsqueeze(1)  # Add one dimension at position 1
+        projected_image_encoding = projected_image_encoding.unsqueeze(0)  # Add one dimension at position 1
     return projected_image_encoding
 
-def combine_text_img_token(text_encoding, projected_image_encoding, cls_encoding, sep_encoding):
+def combine_text_img_token(text_encoding, projected_image_encoding, cls_encoding, sep_encoding, DEVICE):
     text_encoding = text_encoding.to(DEVICE)
     cls_encoding = cls_encoding.to(DEVICE)
     projected_image_encoding = projected_image_encoding.to(DEVICE)
     sep_encoding = sep_encoding.to(DEVICE)
-    combined_tensor = torch.cat((text_encoding, sep_encoding, projected_image_encoding, cls_encoding), dim=1)
+    combined_tensor = torch.cat((text_encoding, cls_encoding, sep_encoding, projected_image_encoding), dim=1)
     return combined_tensor
 
-def attended_sentence_cls(self_attended_sentence_vectors, transfoxl_sep_embs, mask):
+def attended_sentence_cls(self_attended_sentence_vectors, transfoxl_sep_embs, mask, DEVICE):
     new_vec, new_mask = [], []
     linear_layer = nn.Linear(2048, 1024).to(DEVICE)
     for i in range(len(self_attended_sentence_vectors)):
@@ -217,5 +260,75 @@ def attended_sentence_cls(self_attended_sentence_vectors, transfoxl_sep_embs, ma
         result = torch.cat((tensor_a, tensor_b_expanded), dim=-1)
         new_vec.append(linear_layer(result))
 
-    # print(len(new_vec))
+
+        del tensor_a
+        del tensor_b
+        del tensor_b_expanded
+        del result
+    print(len(new_vec))
     return new_vec
+
+def attended_cls_icls(self_attended_sentence_vectors, transfoxl_sep_embs, mask, DEVICE):
+    new_vec, new_mask = [], []
+    if self_attended_sentence_vectors.numel() == 0:
+        return torch.tensor([]).to(DEVICE)
+    else:
+        # linear_layer = nn.Linear(2048, 1024).to(DEVICE)
+        for i in range(len(self_attended_sentence_vectors)):
+            # try:
+            tensor_a = self_attended_sentence_vectors[i]
+            tensor_b = transfoxl_sep_embs['[CLS]'][0].to(DEVICE)
+            tensor_c = transfoxl_sep_embs['[ICLS]'][0].to(DEVICE)
+            # n, m, _ = tensor_a.shape
+            # Expand tensor_b to match the dimensions of tensor_a for concatenation
+            tensor_b_expanded = tensor_b.unsqueeze(0)
+            tensor_c_expanded = tensor_c.unsqueeze(0)
+
+            # Concatenate along the last dimension
+            result = torch.cat((tensor_a, tensor_b_expanded, tensor_c_expanded), dim=0)
+            new_vec.append(result)
+
+
+            del tensor_a
+            del tensor_b
+            del tensor_b_expanded
+            # del result
+        # print(len(new_vec))
+        # return new_vec
+            # print(len(result))
+        return torch.stack(new_vec, dim = 0)
+
+
+
+import torch
+from transformers import XLNetTokenizer, XLNetModel
+
+tokenizer = XLNetTokenizer.from_pretrained('xlnet-large-cased')
+model = XLNetModel.from_pretrained('xlnet-large-cased')
+                                                           
+def concat_images(tensor_list, DEVICE):
+    # Initialize tokenizer and model
+
+    # Encode special tokens to get their embeddings
+    iseparator_token = tokenizer("[ISEP]", add_special_tokens=False, return_tensors="pt").input_ids
+    icls_token = tokenizer("[ICLS]", add_special_tokens=False, return_tensors="pt").input_ids
+
+    with torch.no_grad():
+        # Get embeddings for [ISEP] and [ICLS]
+        isep_embedding = model(iseparator_token).last_hidden_state[:, 0, :].to(DEVICE)  # shape: [1, 1024]
+        icls_embedding = model(icls_token).last_hidden_state[:, 0, :].to(DEVICE)        # shape: [1, 1024]
+
+    # Example list of n tensors, each of shape [1, 1024]
+    n = len(tensor_list)
+
+    # Build the sequence with tensors and [ISEP], ending with [ICLS]
+    sequence = []
+    for tensor in tensor_list:
+        sequence.append(tensor.to(DEVICE))
+        sequence.append(isep_embedding)
+
+    # Remove the last [ISEP] and add [ICLS] at the end
+    sequence = sequence[:-1] + [icls_embedding]
+    # Concatenate into one tensor of shape [(n * 2) - 1, 1024]
+    final_sequence = torch.cat(sequence, dim=0)
+    return final_sequence
