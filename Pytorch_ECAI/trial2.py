@@ -549,6 +549,10 @@ optimizer = optim.Adam([
 #   "batch_size": 4
 # }
 
+checkpoint_dir = './model_checkpoints'
+if not os.path.exists(checkpoint_dir):
+    os.makedirs(checkpoint_dir)
+
 # Training loop
 file_path = "trial2-all-imgs_pubmedbert-1000.txt"
 EPOCHS = 25
@@ -562,5 +566,13 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Validation Accuracy: {valid_accuracy:.4f}')
 
     log_epoch_info(file_path, epoch, train_loss, valid_loss, valid_accuracy)
+    # Save checkpoint
+    checkpoint_path = os.path.join(checkpoint_dir, f'pubmedbert_checkpoint_epoch_{epoch+1}.pth')
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': valid_loss,
+    }, checkpoint_path)
 
 # wandb.finish()

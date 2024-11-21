@@ -41,7 +41,7 @@ warnings.filterwarnings("ignore")
 
 print(torch.cuda.is_available())
 if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:7")
+    DEVICE = torch.device("cuda:5")
     print("Using GPU", DEVICE)
 else:
     DEVICE = torch.device("cpu")
@@ -139,7 +139,7 @@ class CustomDataset(Dataset):
             img = self.images[idx]
             img_label = self.img_labels[idx]
             return text, img, label, img_label
-        gc.collect()
+        
         return text
 
 
@@ -168,9 +168,6 @@ class TransformerXLFramework(nn.Module):
             # Update memory with the current chunk's memory, move memory to GPU for next iteration
             memory = [mem.to(DEVICE) for mem in transformer_xl_output.mems]
 
-            # Clear the chunk_encodings and output from GPU memory after use
-            del chunk_encodings, transformer_xl_output
-            torch.cuda.empty_cache()  # Free unused memory
 
         # Concatenate all chunk embeddings along the sequence dimension
         transformer_xl_embeddings = torch.cat(transformer_xl_embeddings, dim=1)
@@ -304,10 +301,6 @@ class SentenceRelevanceIdentifier(nn.Module):
             x = F.relu(self.fc1(pooled_output))  # Apply ReLU activation function
             x = self.fc2(x)  # Output layer
 
-            del pooled_output
-
-            gc.collect()
-            torch.cuda.empty_cache()
             return torch.sigmoid(x)  # Use sigmoid for binary classification output
 
 
@@ -319,8 +312,7 @@ def train_model(model, train_loader, criterion, optimizer):
         optimizer.zero_grad()
         encodings = [framework.forward(text) for text in texts]
         xlnet_encodings, total_tokens, cls_encodings,  sep, sep_pos, sep_emb, cont, cont_pos = zip(*encodings)
-        gc.collect()
-        torch.cuda.empty_cache()
+        
         sep_token_emb = [elem['[SEP]'][0].unsqueeze(0).unsqueeze(0) for elem in sep_emb]
         sep_all = [elem + ['[CLS]'] for elem in sep]
         for i in range(len(sep_pos)):
@@ -577,7 +569,7 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=colla
 valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 
-gc.collect()
+
 
 # Define the model, criterion, and optimizer
 framework = EncodingFramework()
@@ -628,6 +620,9 @@ optimizer = optim.Adam([
 
 # Training loop
 file_path = "ticl/output.txt"
+checkpoint_path = "ticl/ticl.pth"
+# Ensure directories exist
+os.makedirs(os.path.dirname(file_path), exist_ok=True)
 EPOCHS = 25
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
@@ -639,7 +634,6 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Validation Accuracy Sentences:  {valid_accuracy_sent:.4f}')
     print(f'Validation Accuracy Images:  {valid_accuracy_sent:.4f}')
 
-    checkpoint_path = "ticl/ticl.pth"
     torch.save({'epoch': epoch,                        # Current epoch
     'model_state_dict': model.state_dict(), # Model parameters
     'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)

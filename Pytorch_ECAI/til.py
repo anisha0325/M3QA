@@ -33,7 +33,7 @@ warnings.filterwarnings("ignore")
 
 print(torch.cuda.is_available())
 if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:6")
+    DEVICE = torch.device("cuda:5")
     print("Using GPU")
 else:
     DEVICE = torch.device("cpu")
@@ -171,9 +171,6 @@ class TransformerXLFramework(nn.Module):
             # Update memory with the current chunk's memory, move memory to GPU for next iteration
             memory = [mem.to(DEVICE) for mem in transformer_xl_output.mems]
 
-            # Clear the chunk_encodings and output from GPU memory after use
-            del chunk_encodings, transformer_xl_output
-              # Free unused memory
 
         # Concatenate all chunk embeddings along the sequence dimension
         transformer_xl_embeddings = torch.cat(transformer_xl_embeddings, dim=1)
@@ -535,9 +532,12 @@ optimizer = optim.Adam([
 #   "epochs": 10,
 #   "batch_size": 4
 # }
-
+import os
 # Training loop
 file_path = "til/output.txt"
+checkpoint_path = "til/til.pth"
+# Ensure directories exist
+os.makedirs(os.path.dirname(file_path), exist_ok=True)
 EPOCHS = 25
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
@@ -547,8 +547,7 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Train Loss: {train_loss:.4f}')
     print(f'Validation Loss: {valid_loss:.4f}')
     print(f'Validation Accuracy: {valid_accuracy:.4f}')
-    
-    checkpoint_path = "til/til.pth"
+    # Ensure the directory exists
     torch.save({'epoch': epoch,                        # Current epoch
     'model_state_dict': model.state_dict(), # Model parameters
     'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
