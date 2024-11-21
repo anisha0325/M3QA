@@ -565,9 +565,9 @@ valid_dataset = CustomDataset(valid_texts, valid_img, valid_labels, valid_img_la
 test_dataset = CustomDataset(test_texts, test_img, test_labels, test_img_labels)
 
 batch_size = 4
-train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
-valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True, num_workers=4, pin_memory=True)
+valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False, num_workers=4, pin_memory=True)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False, num_workers=4, pin_memory=True)
 
 
 
