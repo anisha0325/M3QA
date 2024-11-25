@@ -25,6 +25,8 @@ import numpy as np
 # from Visual_embeddings import create_vis_embs
 from helper import *
 from sklearn.metrics import f1_score
+from itertools import chain
+
 
 
 # os.environ["CUDA_VISIBLE_DEVICES"]="6"
@@ -36,7 +38,7 @@ warnings.filterwarnings("ignore")
 
 print(torch.cuda.is_available())
 if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:0")
+    DEVICE = torch.device("cuda:6")
     print("Using GPU")
 else:
     DEVICE = torch.device("cpu")
@@ -110,7 +112,6 @@ class EncodingFramework(nn.Module):
         # Find positions of each separator in the tokenized input
         separator_positions = {sep: [] for sep in separators}
         for sep, token_id in zip(separators, separator_ids):
-            breakpoint()
             pos = (input_ids == token_id).nonzero(as_tuple=True)[0].tolist()
             separator_positions[sep] = pos
 
@@ -334,7 +335,9 @@ def train_model(model, train_loader, criterion, optimizer):
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
 
-            loss = criterion(padded_logits, padded_labels)
+            one_labels, one_logits, loss = only_one_loss(padded_labels, padded_logits, DEVICE)
+            # loss = criterion(one_labels, one_logits)
+            print(loss)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -388,21 +391,24 @@ def evaluate_model(model, valid_loader, criterion):
             padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
-            loss = criterion(padded_logits, padded_labels)
-
+            one_labels, one_logits, loss = only_one_loss(padded_labels, padded_logits, DEVICE)
+            # loss = criterion(one_labels, one_logits)
             total_loss += loss.item()
-            accuracy_sample += calc_accuracy(padded_logits, padded_labels)
-            f1_score_sample = f1_score_sample + f1_score(padded_labels.cpu(), padded_logits.cpu(), average='macro')  # Use 'micro' or 'weighted' as needed
+            acc, f1 = calc_accuracy(one_labels, one_logits, type = 'micro')
+            accuracy_sample += acc
+            f1_score_sample += f1
 
     
     c = c + 1
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
     return total_loss / (len(valid_loader) - num_excl), accuracy_sample / (len(valid_loader) - num_excl), f1_score_sample / (len(valid_loader) - num_excl)
 
-def test_model(model, test_loader, output_folder):
+def test_model(model, test_loader):
     model.eval()
     accuracy_sample, f1_score_sample = 0, 0
+    all_pred_ans, all_true_ans, all_ques = [],[],[]
     c, num_excl = 0, 0
+    total_loss = 0
     with torch.no_grad():
         for texts, imgs, labels in tqdm(test_loader):
 
@@ -437,28 +443,30 @@ def test_model(model, test_loader, output_folder):
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
 
-            accuracy_sample += calc_accuracy(padded_logits, padded_labels)
-            f1_score_sample = f1_score_sample + f1_score(padded_labels.cpu(), padded_logits.cpu(), average='macro')  # Use 'micro' or 'weighted' as needed
+            one_labels, one_logits, loss = only_one_loss(padded_labels, padded_logits, DEVICE)
+            # loss = criterion(one_labels, one_logits)
+            total_loss += loss.item()
+            acc, f1 = calc_accuracy(one_labels, one_logits, type = 'micro')
+            accuracy_sample += acc
+            f1_score_sample += f1
 
-            pred_answers, true_answers, questions = gen_answer(padded_logits,labels, texts)
-            all_pred_ans.append(pred_answers)
-            all_true_ans.append(true_answers)
-            all_ques.append(questions)
+            # pred_answers, true_answers, questions = gen_answer(padded_logits,labels, texts)
+            # all_pred_ans.append(pred_answers)
+            # all_true_ans.append(true_answers)
+            # all_ques.append(questions)
         
 
-    all_pred_ans = list(chain.from_iterable(all_pred_ans))
-    all_true_ans = list(chain.from_iterable(all_true_ans))
-    all_ques = list(chain.from_iterable(all_ques))
-    df = pd.DataFrame({'Question': all_ques, "True Answer": all_true_ans, "Predicted Answer": all_pred_ans})
-    output_filepath = output_folder + "predictions.csv"
-    df.to_csv(output_filepath, index = False)
-
+    # all_pred_ans = list(chain.from_iterable(all_pred_ans))
+    # all_true_ans = list(chain.from_iterable(all_true_ans))
+    # all_ques = list(chain.from_iterable(all_ques))
+    # df = pd.DataFrame({'Question': all_ques, "True Answer": all_true_ans, "Predicted Answer": all_pred_ans})
+    # df.to_csv("tip/tip_output.csv", index = False)
     c = c + 1
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
     return accuracy_sample / (len(test_loader) - num_excl), f1_score_sample / (len(test_loader) - num_excl)
 
 # --------------------------------------------------------------------------------------------------------------------------------
-'''
+''' 
 context_qa_list: 
     -type: list
     -contents: individual dictionaries of the form {[Context 1]: context,
@@ -509,7 +517,7 @@ hidden_size = 512
 image_size = 1024
 
 # num = len(list(QID_context.values()))
-num = 30
+num =30
 labels = []
 corr_context = list(QID_context.values())[:num]
 corr_ans = list(QID_ans.values())[:num]
@@ -553,7 +561,7 @@ train_dataset = CustomDataset(train_texts, train_img, train_labels)
 valid_dataset = CustomDataset(valid_texts, valid_img, valid_labels)
 test_dataset = CustomDataset(test_texts, test_img, test_labels)
 
-batch_size = 4
+batch_size = 8
 train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=True)
 valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False)
@@ -618,10 +626,11 @@ optimizer = optim.Adam([
 # }
 import os
 # Training loop
-output_folder = "tip/"
-os.makedirs(os.path.dirname(output_folder), exist_ok=True)
-
-EPOCHS = 25
+# file_path = "tip_16/output.txt"
+# checkpoint_path = "tip_16/tip.pth"
+# Ensure directories exist
+# os.makedirs(os.path.dirname(file_path), exist_ok=True)
+EPOCHS = 2
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
     valid_loss, valid_accuracy, valid_f1 = evaluate_model(model, valid_loader, criterion)
@@ -630,19 +639,20 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Train Loss: {train_loss:.4f}')
     print(f'Validation Loss: {valid_loss:.4f}')
     print(f'Validation Accuracy: {valid_accuracy:.4f}')
+    print(f'Validation F1: {valid_f1:.4f}')
     
-    checkpoint_path = output_folder + "checkpoint.pth"
-    torch.save({'epoch': epoch,                        # Current epoch
-    'model_state_dict': model.state_dict(), # Model parameters
-    'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
+    # checkpoint_path = "tip_16/tip_16.pth"
+    # torch.save({'epoch': epoch,                        # Current epoch
+    # 'model_state_dict': model.state_dict(), # Model parameters
+    # 'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
 
-    test_accuracy, test_f1 = test_model(model, test_loader, output_folder)
+    test_accuracy, test_f1 = test_model(model, test_loader)
     test_accuracy = test_accuracy * 100
     print(f'Test Accuracy: {test_accuracy:.4f}')
     print(f'Test F1: {test_f1:.4f}')
 
 
-    log_epoch_info_3(output_folder, epoch, train_loss, valid_loss, valid_accuracy, valid_f1, test_accuracy, test_f1)
+    # log_epoch_info_3(file_path, epoch, train_loss, valid_loss, valid_accuracy, valid_f1, test_accuracy, test_f1)
 
 print(f'Test Accuracy: {test_accuracy:.4f}')
 print(f'Test F1: {test_f1:.4f}')

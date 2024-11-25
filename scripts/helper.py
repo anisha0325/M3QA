@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from entmax import sparsemax, entmax15
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, classification_report
 import os
 import numpy as np
 import warnings
@@ -50,7 +50,8 @@ def convert_context(context):
     return csep_sentences
 
 def create_labels(context_sentences, answer_sentences):
-
+    context_sentences = [sentence.strip() for sentence in context_sentences if sentence != '']
+    answer_sentences = [sentence.strip() for sentence in answer_sentences if sentence != '']
     labels = [1 if sentence in answer_sentences else 0 for sentence in context_sentences]
     return labels
 
@@ -222,11 +223,12 @@ def pad_tensor_lists(tensor_list1, tensor_list2):
 
 
 # Step 1: Accuracy Calculation
-def calc_accuracy(labels, preds):
+def calc_accuracy(labels, preds, type = 'weighted'):
     acc, f1 = 0, 0
     for pred, label in zip(preds, labels):
         acc += accuracy_score(label.cpu(), pred.cpu())
-        f1 += f1_score(label.cpu(), pred.cpu(), average='weighted')
+        f1 += f1_score(label.cpu(), pred.cpu(), average=type)
+        # print(classification_report(label.cpu(), pred.cpu()))
         # print(classification_report(label.cpu(), pred.cpu()))
     # correct = torch.eq(preds, labels).sum().item()  # Count correct predictions
     # total = torch.numel(labels)
@@ -235,11 +237,12 @@ def calc_accuracy(labels, preds):
 
 def log_epoch_info_text_img(file_path, epoch, train_loss, valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_img, test_sent_accuracy, test_sent_f1, test_img_accuracy, test_img_f1):
     # Open the file in append mode ('a') to keep adding lines without overwriting
+    file_path = file_path + "epoch_info.txt"
     with open(file_path, 'a') as f:
         f.write(f"Epoch: {epoch}, Train_loss: {train_loss:.4f}, Valid_loss: {valid_loss:.4f}, Valid_sentence_accuracy: {valid_accuracy_sent:.4f}, Valid_image_accuracy: {valid_accuracy_img:.4f}, Test_sentence_accuracy: {test_sent_accuracy:.4f}, Test_image_accuracy: {test_img_accuracy:.4f}, Valid_sentence_f1: {valid_f1_sent:.4f}, Valid_image_f1: {valid_f1_img:.4f}, Test_sentence_f1: {test_sent_f1:.4f}, Test_image_f1: {test_img_f1:.4f}%\n")
 
 def log_epoch_info(file_path, epoch_num, train_loss, valid_loss, valid_sent_accuracy, valid_img_accuracy, test_sent_acc, test_img_acc):
-
+    file_path = file_path + "epoch_info.txt"
     # Open the file in append mode ('a') to keep adding lines without overwriting
     with open(file_path, 'a') as f:
         f.write(f"Epoch: {epoch_num}, Train_loss: {train_loss:.4f}, Valid_loss: {valid_loss:.4f}, Valid_sentence_accuracy: {valid_sent_accuracy:.4f}, Valid_image_accuracy: {valid_img_accuracy:.4f}, Test_sentence_accuracy: {test_sent_acc:.4f}, Test_image_accuracy: {test_img_acc:.4f}%\n")
@@ -357,3 +360,68 @@ def concat_images(tensor_list, DEVICE):
     # Concatenate into one tensor of shape [(n * 2) - 1, 1024]
     final_sequence = torch.cat(sequence, dim=0)
     return final_sequence
+
+def only_one_loss(labels,logits, DEVICE):
+    one_labels, one_logits = [], []
+    for label, logit in zip(labels, logits):
+        positions = torch.nonzero(label == 1.0, as_tuple=True)
+        one_label = label[positions]
+        one_logit = logit[positions]
+        one_labels.append(one_label.clone().detach().requires_grad_(True))
+        one_logits.append(one_logit.clone().detach().requires_grad_(True))
+    # Pad sequences to the same length
+    padded_predictions = pad_sequence(one_logits, batch_first=True)  # Shape: (4, max_len)
+    padded_targets = pad_sequence(one_labels, batch_first=True)      # Shape: (4, max_len)
+    # Create a mask to identify valid positions
+    # Create a mask to identify valid positions
+    lengths = torch.tensor([len(t) for t in padded_targets], device=DEVICE)  # Original lengths
+    mask = torch.arange(padded_targets.size(1), device=DEVICE).expand(len(lengths), -1) < lengths.unsqueeze(1)
+
+    # Compute the loss while ignoring padded positions
+    loss = F.binary_cross_entropy(
+        padded_predictions, 
+        padded_targets.float(), 
+        reduction="none"
+    )
+
+    # Apply mask and compute mean loss over valid positions
+    loss = (loss * mask).sum() / mask.sum()
+    return one_labels, one_logits, loss
+
+def gen_answer(logits, labels, texts):
+    pred_answers = []
+    true_answers = []
+    questions = []
+    for logit, label, text in zip(logits, labels, texts): 
+        # Split the paragraph by the [CSEP] token to get dynamic contents
+        all_separated = text.split("[SEP]")
+        question = all_separated[0]
+        all_separated = [content.strip() for content in all_separated if content.strip()]  # Remove any extra spaces
+
+        no_context = all_separated[:-1]
+
+        only_context = all_separated[-1]
+        only_context_items = only_context.split("[CSEP]")
+        only_context_items = [content.strip() for content in only_context_items if content.strip()] 
+
+        # Predicted answer
+        sentence_list = only_context_items[:len(logit)+1]
+        selected_indices = torch.nonzero(logit == 1.0, as_tuple=True)[0].tolist()
+        if len(selected_indices) == 0:
+            new_sentences = []
+        else:
+            new_sentences = [sentence_list[i] for i in selected_indices]   
+        pred_answers.append(''.join(new_sentences))
+
+        # True answer
+        sentence_list = only_context_items[:len(label)+1]
+        selected_indices = torch.nonzero(label == 1.0, as_tuple=True)[0].tolist()
+        if len(selected_indices) == 0:
+            new_sentences = []
+        else:
+            new_sentences = [sentence_list[i] for i in selected_indices]  
+        true_answers.append(''.join(new_sentences))
+
+        questions.append(question)
+
+    return pred_answers, true_answers, questions

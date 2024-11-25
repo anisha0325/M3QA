@@ -382,7 +382,7 @@ def evaluate_model(model, valid_loader, criterion):
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
     return total_loss / len(valid_loader), accuracy_sample / len(valid_loader), f1_score_sample / len(valid_loader)
 
-def test_model(model, test_loader):
+def test_model(model, test_loader, output_folder):
     model.eval()
     accuracy_sample, f1_score_sample = 0, 0
     c, num_excl = 0, 0
@@ -423,6 +423,19 @@ def test_model(model, test_loader):
             acc, f1 = calc_accuracy(padded_logits, padded_labels)
             accuracy_sample += acc
             f1_score_sample += f1
+
+            pred_answers, true_answers, questions = gen_answer(padded_logits,labels, texts)
+            all_pred_ans.append(pred_answers)
+            all_true_ans.append(true_answers)
+            all_ques.append(questions)
+        
+
+    all_pred_ans = list(chain.from_iterable(all_pred_ans))
+    all_true_ans = list(chain.from_iterable(all_true_ans))
+    all_ques = list(chain.from_iterable(all_ques))
+    df = pd.DataFrame({'Question': all_ques, "True Answer": all_true_ans, "Predicted Answer": all_pred_ans})
+    output_filepath = output_folder + "predictions.csv"
+    df.to_csv(output_filepath, index = False)
     
     c = c + 1
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
@@ -582,17 +595,12 @@ optimizer = optim.Adam([
             pos_seq = torch.arange(klen - 1, -1, -1.0, device=word_emb.device, dtype=torch.int64).type_as(word_emb)
 ''' 
 
-# wandb.login()
-# wandb.init(project='MEDQA-IMG',)
-# wandb.config = {
-#   "learning_rate": 1e-5,
-#   "epochs": 10,
-#   "batch_size": 4
-# }
 
-# Training loop
-file_path = "til/output.txt"
+output_folder = "til/"
+os.makedirs(os.path.dirname(output_folder), exist_ok=True)
+
 EPOCHS = 2
+
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
     valid_loss, valid_accuracy, valid_f1 = evaluate_model(model, valid_loader, criterion)
@@ -602,18 +610,18 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Validation Loss: {valid_loss:.4f}')
     print(f'Validation Accuracy: {valid_accuracy:.4f}')
     
-    checkpoint_path = "til/til.pth"
+    checkpoint_path = output_folder + "checkpoint.pth"
     torch.save({'epoch': epoch,                        # Current epoch
     'model_state_dict': model.state_dict(), # Model parameters
     'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
 
-    test_accuracy, test_f1 = test_model(model, test_loader)
+    test_accuracy, test_f1 = test_model(model, test_loader, output_folder)
     test_accuracy = test_accuracy * 100
     print(f'Test Accuracy: {test_accuracy:.4f}')
     print(f'Test F1: {test_f1:.4f}')
 
 
-    log_epoch_info_3(file_path, epoch, train_loss, valid_loss, valid_accuracy, valid_f1, test_accuracy, test_f1)
+    log_epoch_info_3(output_folder, epoch, train_loss, valid_loss, valid_accuracy, valid_f1, test_accuracy, test_f1)
 
 print(f'Test Accuracy: {test_accuracy:.4f}')
 print(f'Test F1: {test_f1:.4f}')

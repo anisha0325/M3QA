@@ -474,7 +474,7 @@ def evaluate_model(model, valid_loader, criterion):
     c = c + 1
     return total_loss / (len(valid_loader) - num_excl), accuracy_sent / (len(valid_loader) - num_excl), accuracy_img / (len(valid_loader) - num_excl), f1_score_sent / (len(valid_loader) - num_excl), f1_score_img / (len(valid_loader) - num_excl)
 
-def test_model(model, test_loader):
+def test_model(model, test_loader, output_folder):
     model.eval()
     accuracy_sent, accuracy_img, f1_score_sent, f1_score_img = 0, 0, 0, 0
     c, num_excl = 0, 0
@@ -548,6 +548,20 @@ def test_model(model, test_loader):
             loss_img = criterion(padded_logits_img, padded_labels_img)
             loss = 0.7 * loss_sent + 0.3 * loss_img
             total_loss += loss.item()
+
+            pred_answers, true_answers, questions = gen_answer(padded_logits_sent,labels, texts)
+            all_pred_ans.append(pred_answers)
+            all_true_ans.append(true_answers)
+            all_ques.append(questions)
+        
+
+    all_pred_ans = list(chain.from_iterable(all_pred_ans))
+    all_true_ans = list(chain.from_iterable(all_true_ans))
+    all_ques = list(chain.from_iterable(all_ques))
+    df = pd.DataFrame({'Question': all_ques, "True Answer": all_true_ans, "Predicted Answer": all_pred_ans})
+    
+    output_filepath = output_folder + "predictions.csv"
+    df.to_csv(output_filepath, index = False)
 
     c = c + 1
     return accuracy_sent / (len(test_loader) - num_excl), accuracy_img / (len(test_loader) - num_excl), f1_score_sent / (len(test_loader) - num_excl), f1_score_img / (len(test_loader) - num_excl)
@@ -716,8 +730,10 @@ optimizer = optim.Adam([
 
 
 # Training loop
-file_path = "ticl/output.txt"
+output_folder = "ticl/"
 EPOCHS = 25
+os.makedirs(os.path.dirname(output_folder), exist_ok=True)
+
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
     valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_img = evaluate_model(model, valid_loader, criterion)
@@ -729,12 +745,13 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Validation Accuracy Images:  {valid_accuracy_sent:.4f}')
     print(f'Validation F1 Sentences:  {valid_f1_sent:.4f}')
     print(f'Validation F1 Images:  {valid_f1_img:.4f}')
-    checkpoint_path = "ticl/ticl.pth"
+
+    checkpoint_path = output_folder + "checkpoint.pth"
     torch.save({'epoch': epoch,                        # Current epoch
     'model_state_dict': model.state_dict(), # Model parameters
     'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
 
-    test_sent_accuracy, test_img_accuracy, test_sent_f1, test_img_f1 = test_model(model, test_loader)
+    test_sent_accuracy, test_img_accuracy, test_sent_f1, test_img_f1 = test_model(model, test_loader, output_folder)
     test_sent_accuracy = test_sent_accuracy * 100
     test_img_accuracy = test_img_accuracy * 100
     print(f'Test Sent Accuracy: {test_sent_accuracy:.4f}')
@@ -744,4 +761,4 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
 
 
 
-    log_epoch_info(file_path, epoch, train_loss, valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_sent, test_sent_accuracy, test_sent_f1, test_img_accuracy, test_img_f1)
+    log_epoch_info(output_folder, epoch, train_loss, valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_sent, test_sent_accuracy, test_sent_f1, test_img_accuracy, test_img_f1)

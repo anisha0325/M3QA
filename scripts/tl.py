@@ -512,7 +512,7 @@ def evaluate_model(model, valid_loader, criterion):
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
     return total_loss / (len(valid_loader) - num_excl), accuracy_sample / (len(valid_loader) - num_excl), f1_score_sample / (len(valid_loader) - num_excl)
 
-def test_model(model, test_loader):
+def test_model(model, test_loader, output_folder):
     model.eval()
     accuracy_sample, f1_score_sample = 0, 0
     c, num_excl = 0,0 
@@ -529,26 +529,34 @@ def test_model(model, test_loader):
             attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
             fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
             fl_sentence_vectors_cls= attended_sentence_cls(fl_sentence_vectors, transfoxl_sep_embs, padded_masks)
-            if len(fl_sentence_vectors_cls) == batch_size:
-                inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
-                                    for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors_cls, padded_masks)]
-        
-                attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
-        
-                predictions = [classification_head(vectors) for vectors in attended_sentence_output]
-                logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
-                padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
-                padded_labels = padded_labels.to(DEVICE)
-                padded_logits = padded_logits.to(DEVICE)
+            inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
+                                for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors_cls, padded_masks)]
+    
+            attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
+    
+            predictions = [classification_head(vectors) for vectors in attended_sentence_output]
+            logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
+            padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
+            padded_labels = padded_labels.to(DEVICE)
+            padded_logits = padded_logits.to(DEVICE)
 
-                acc, f1 = calc_accuracy(padded_labels, padded_logits)
-                accuracy_sample += acc
-                f1_score_sample += f1
-            else:
-                num_excl = num_excl + 1
-                print("Batch {} excluded from test".format(c))
-                with open("batch_excluded.txt", 'a') as f:
-                    f.write(f"Batch: {c} excluded from eval %\n")
+            acc, f1 = calc_accuracy(padded_labels, padded_logits)
+            accuracy_sample += acc
+            f1_score_sample += f1
+
+            pred_answers, true_answers, questions = gen_answer(padded_logits,labels, texts)
+            all_pred_ans.append(pred_answers)
+            all_true_ans.append(true_answers)
+            all_ques.append(questions)
+        
+
+    all_pred_ans = list(chain.from_iterable(all_pred_ans))
+    all_true_ans = list(chain.from_iterable(all_true_ans))
+    all_ques = list(chain.from_iterable(all_ques))
+    df = pd.DataFrame({'Question': all_ques, "True Answer": all_true_ans, "Predicted Answer": all_pred_ans})
+    output_filepath = output_folder + "predictions.csv"
+    df.to_csv(output_filepath, index = False)
+
 
     c = c + 1
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
@@ -687,7 +695,9 @@ optimizer = optim.Adam([
 '''
 
 # Training loop
-file_path = "tl/output.txt"
+output_folder = "tip/"
+os.makedirs(os.path.dirname(output_folder), exist_ok=True)
+
 EPOCHS = 25
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
@@ -699,17 +709,17 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Validation Accuracy: {valid_accuracy:.4f}')
     print(f'Validation F1: {valid_f1:.4f}')
 
-    checkpoint_path = "tl/tl.pth"
+    checkpoint_path = output_folder + "checkpoint.pth"
     torch.save({'epoch': epoch,                        # Current epoch
     'model_state_dict': model.state_dict(), # Model parameters
     'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
-    test_accuracy, test_f1 = test_model(model, test_loader)
+    test_accuracy, test_f1 = test_model(model, test_loader, output_folder)
     test_accuracy = test_accuracy * 100
     print(f'Test Accuracy: {test_accuracy:.4f}')
     print(f'Test F1: {test_f1:.4f}')
 
 
-    log_epoch_info_3(file_path, epoch, train_loss, valid_loss, valid_accuracy, valid_f1, test_accuracy, test_f1)
+    log_epoch_info_3(output_folder, epoch, train_loss, valid_loss, valid_accuracy, valid_f1, test_accuracy, test_f1)
 
 print(f'Test Accuracy: {test_accuracy:.4f}')
 print(f'Test F1: {test_f1:.4f}')
