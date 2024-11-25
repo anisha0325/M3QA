@@ -1,3 +1,4 @@
+ 
 import random
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
@@ -6,6 +7,8 @@ from torch.nn.utils.rnn import pad_sequence
 from torch import nn
 from transformers import XLNetTokenizer, XLNetModel, TransfoXLModel
 from transformers import LongformerTokenizer, LongformerModel
+from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModel
+
 import torch.optim as optim
 import pandas as pd
 from tqdm import tqdm
@@ -41,7 +44,7 @@ warnings.filterwarnings("ignore")
 
 print(torch.cuda.is_available())
 if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:7")
+    DEVICE = torch.device("cuda:2")
     print("Using GPU", DEVICE)
 else:
     DEVICE = torch.device("cpu")
@@ -50,10 +53,11 @@ else:
 
 
 class EncodingFramework(nn.Module):
-    def __init__(self, model_name='allenai/longformer-base-4096'):
+    def __init__(self, model_name='neuml/pubmedbert-base-embeddings'):
         super(EncodingFramework, self).__init__()
-        self.tokenizer = LongformerTokenizer.from_pretrained(model_name)
-        self.model = LongformerModel.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name)
+        self.chunk_size = 512
         self.projection_layer = nn.Linear(768, embedding_dim)  # Projection layer to 1024
 
     def forward(self, text):
@@ -63,22 +67,55 @@ class EncodingFramework(nn.Module):
         tokens = self.tokenizer(text, add_special_tokens=True, return_tensors="pt",max_length=2200,truncation=True,padding='max_length')
         token_cls = self.tokenizer("[CLS]", return_tensors = "pt")
 
-        # Get tokenized IDs
-        input_ids = tokens['input_ids']
+        # # Get tokenized IDs
+        # input_ids = tokens['input_ids']
+        # input_ids_cls = token_cls['input_ids']
+
+        # input_ids = input_ids.to(DEVICE)
+        # input_ids_cls = input_ids_cls.to(DEVICE)
+
+        # outputs = self.model(input_ids=input_ids)
+        # output_cls = self.model(input_ids=input_ids_cls)
+
+        # # Get the token embeddings (output hidden states)
+        # token_embeddings = outputs.last_hidden_state.detach().cpu()
+        # cls_embeddings = output_cls.last_hidden_state.detach().cpu()
+        # token_embeddings = self.projection_layer(token_embeddings.to(DEVICE))
+        # cls_embeddings = self.projection_layer(cls_embeddings.to(DEVICE))
+        # total_tokens = input_ids.size(1)
+
+        input_ids = tokens['input_ids'].squeeze(0)
+        # Divide input_ids into chunks of size `chunk_size`
+        input_chunks = input_ids.split(self.chunk_size)
+        token_embeddings_list = []
+        cls_embeddings_list = []
+        for chunk in input_chunks:
+            chunk = chunk.unsqueeze(0).to(DEVICE)  # Add batch dimension for model processing
+            outputs = self.model(input_ids=chunk)
+            # Collect CLS and token embeddings for each chunk
+            token_embeddings_list.append(outputs.last_hidden_state)
+            cls_embeddings_list.append(outputs.last_hidden_state[:, 0, :])
+        
+        # Concatenate chunk embeddings
+        token_embeddings = torch.cat(token_embeddings_list, dim=1)  # Combine along sequence dimension
+        cls_embeddings = torch.cat(cls_embeddings_list, dim=0)  # Combine CLS embeddings from each chunk
+
         input_ids_cls = token_cls['input_ids']
 
-        input_ids = input_ids.to(DEVICE)
+        # input_ids = input_ids.to(DEVICE)
         input_ids_cls = input_ids_cls.to(DEVICE)
 
-        outputs = self.model(input_ids=input_ids)
+        # outputs = self.model(input_ids=input_ids)
         output_cls = self.model(input_ids=input_ids_cls)
 
         # Get the token embeddings (output hidden states)
-        token_embeddings = outputs.last_hidden_state.detach().cpu()
+        # token_embeddings = outputs.last_hidden_state.detach().cpu()
         cls_embeddings = output_cls.last_hidden_state.detach().cpu()
+        
         token_embeddings = self.projection_layer(token_embeddings.to(DEVICE))
         cls_embeddings = self.projection_layer(cls_embeddings.to(DEVICE))
-        total_tokens = input_ids.size(1)
+
+        total_tokens = input_ids.unsqueeze(0).size(1)
 
         # Define separator tokens
         separators = ["[SEP]", "[CSEP]"]
@@ -87,7 +124,7 @@ class EncodingFramework(nn.Module):
         # Find positions of each separator in the tokenized input
         separator_positions = {sep: [] for sep in separators}
         for sep, token_id in zip(separators, separator_ids):
-            pos = (input_ids == token_id).nonzero(as_tuple=True)[1].tolist()
+            pos = (input_ids == token_id).nonzero(as_tuple=True)[0].tolist()
             separator_positions[sep] = pos
 
         # Split the paragraph by the [CSEP] token to get dynamic contents
@@ -103,13 +140,13 @@ class EncodingFramework(nn.Module):
 
         # Tokenize each content part individually (for dynamic content)
         content_ids = []
-      /raid/biplab/sarthak/MedQA/Pytorch_ECAI/til  content_positions = []
+        content_positions = []
         for content in contents:
             content_tokens = self.tokenizer(content, add_special_tokens=False, return_tensors="pt")['input_ids']
             content_ids.append(content_tokens)
             positions = []
             for token_id in content_tokens[0]:
-                pos = (input_ids == token_id.item()).nonzero(as_tuple=True)[1].tolist()
+                pos = (input_ids == token_id.item()).nonzero(as_tuple=True)[0].tolist()
                 if pos:
                     positions.append(pos[0])
             content_positions.append(positions)
@@ -369,20 +406,17 @@ def train_model(model, train_loader, criterion, optimizer):
             padded_labels_sent = padded_labels_sent.to(DEVICE)
             padded_logits_sent = padded_logits_sent.to(DEVICE)
 
+
             logits_img = logits_img.to(DEVICE)
             labels_img = img_labels.float().to(DEVICE)
-
             padded_logits_img, padded_labels_img = pad_tensor_lists(logits_img, labels_img.float())
             padded_labels_img = padded_labels_img.to(DEVICE)
             padded_logits_img = padded_logits_img.to(DEVICE)
-            
+
             loss_sent = criterion(padded_logits_sent, padded_labels_sent)
             loss_img = criterion(padded_logits_img, padded_labels_img)
             loss = 0.7 * loss_sent + 0.3 * loss_img
-            loss.backward()
-            optimizer.step()
             total_loss += loss.item()
-
 
         else:
             num_excl = num_excl + 1
@@ -449,6 +483,9 @@ def evaluate_model(model, valid_loader, criterion):
             padded_labels_sent = padded_labels_sent.to(DEVICE)
             padded_logits_sent = padded_logits_sent.to(DEVICE)
 
+            acc, f1 = calc_accuracy(padded_labels_sent, padded_logits_sent)
+            accuracy_sent += acc
+            f1_score_sent += f1
 
 
             logits_img = logits_img.to(DEVICE)
@@ -456,24 +493,24 @@ def evaluate_model(model, valid_loader, criterion):
             padded_logits_img, padded_labels_img = pad_tensor_lists(logits_img, labels_img.float())
             padded_labels_img = padded_labels_img.to(DEVICE)
             padded_logits_img = padded_logits_img.to(DEVICE)
+
+            acc, f1 = calc_accuracy(padded_labels_img, padded_logits_img)
+            accuracy_img += acc
+            f1_score_img += f1
+
             loss_sent = criterion(padded_logits_sent, padded_labels_sent)
             loss_img = criterion(padded_logits_img, padded_labels_img)
             loss = 0.7 * loss_sent + 0.3 * loss_img
             total_loss += loss.item()
 
-            accuracy_sent += calc_accuracy(padded_logits_sent, padded_labels_sent)
-            accuracy_img += calc_accuracy(padded_logits_img, padded_labels_img)
-            f1_score_sent = f1_score_sent + f1_score(padded_labels_sent.cpu(), padded_logits_sent.cpu(), average='macro')  # Use 'micro' or 'weighted' as needed
-            f1_score_img = f1_score_img + f1_score(padded_labels_img.cpu(), padded_logits_img.cpu(), average='macro')  # Use 'micro' or 'weighted' as needed
-
-
     c = c + 1
     return total_loss / (len(valid_loader) - num_excl), accuracy_sent / (len(valid_loader) - num_excl), accuracy_img / (len(valid_loader) - num_excl), f1_score_sent / (len(valid_loader) - num_excl), f1_score_img / (len(valid_loader) - num_excl)
 
-def test_model(model, test_loader):
+def test_model(model, test_loader, output_folder):
     model.eval()
     accuracy_sent, accuracy_img, f1_score_sent, f1_score_img = 0, 0, 0, 0
     c, num_excl = 0, 0
+    total_loss = 0
     with torch.no_grad():
         for texts, imgs, labels, img_labels in tqdm(test_loader):
 
@@ -525,6 +562,9 @@ def test_model(model, test_loader):
             padded_labels_sent = padded_labels_sent.to(DEVICE)
             padded_logits_sent = padded_logits_sent.to(DEVICE)
 
+            acc, f1 = calc_accuracy(padded_labels_sent, padded_logits_sent)
+            accuracy_sent += acc
+            f1_score_sent += f1
 
 
             logits_img = logits_img.to(DEVICE)
@@ -532,15 +572,28 @@ def test_model(model, test_loader):
             padded_logits_img, padded_labels_img = pad_tensor_lists(logits_img, labels_img.float())
             padded_labels_img = padded_labels_img.to(DEVICE)
             padded_logits_img = padded_logits_img.to(DEVICE)
+
+            acc, f1 = calc_accuracy(padded_labels_img, padded_logits_img)
+            accuracy_img += acc
+            f1_score_img += f1
+
             loss_sent = criterion(padded_logits_sent, padded_labels_sent)
             loss_img = criterion(padded_logits_img, padded_labels_img)
             loss = 0.7 * loss_sent + 0.3 * loss_img
             total_loss += loss.item()
 
-            accuracy_sent += calc_accuracy(padded_logits_sent, padded_labels_sent)
-            accuracy_img += calc_accuracy(padded_logits_img, padded_labels_img)
-            f1_score_sent = f1_score_sent + f1_score(padded_labels_sent.cpu(), padded_logits_sent.cpu(), average='macro')  # Use 'micro' or 'weighted' as needed
-            f1_score_img = f1_score_img + f1_score(padded_labels_img.cpu(), padded_logits_img.cpu(), average='macro')  # Use 'micro' or 'weighted' as needed
+            pred_answers, true_answers, questions = gen_answer(padded_logits_sent,labels, texts)
+            all_pred_ans.append(pred_answers)
+            all_true_ans.append(true_answers)
+            all_ques.append(questions)
+        
+
+    all_pred_ans = list(chain.from_iterable(all_pred_ans))
+    all_true_ans = list(chain.from_iterable(all_true_ans))
+    all_ques = list(chain.from_iterable(all_ques))
+    df = pd.DataFrame({'Question': all_ques, "True Answer": all_true_ans, "Predicted Answer": all_pred_ans})
+    output_filepath = output_folder + "predictions.csv"
+    df.to_csv(output_filepath, index = False)
 
 
     c = c + 1
@@ -593,7 +646,8 @@ embedding_dim = 1024 # This is the embeddings dimension of each of transfoxl_emb
 hidden_size = 512
 image_size = 1024
 
-num = len(list(QID_context.values()))
+# num = len(list(QID_context.values()))
+num = 30
 labels = []
 corr_context = list(QID_context.values())[:num]
 corr_ans = list(QID_ans.values())[:num]
@@ -639,6 +693,8 @@ for img in tqdm(images_combined):
         # print(img)
         conv_images.append(torch.tensor(img))
 
+conv_images = conv_images[:num]
+
 train_texts, temp_texts, train_img, temp_img, train_labels, temp_labels, train_img_labels, temp_img_labels = train_test_split(combined_texts,conv_images, labels, img_labels, test_size=0.3, random_state=42)
 valid_texts, test_texts, valid_img, test_img, valid_labels, test_labels, valid_img_labels, test_img_labels = train_test_split(temp_texts,temp_img, temp_labels, temp_img_labels, test_size=0.5, random_state=42)
 
@@ -651,10 +707,14 @@ train_dataset = CustomDataset(train_texts, train_img, train_labels, train_img_la
 valid_dataset = CustomDataset(valid_texts, valid_img, valid_labels, valid_img_labels)
 test_dataset = CustomDataset(test_texts, test_img, test_labels, test_img_labels)
 
-batch_size = 8
+batch_size = 4
 train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
 valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
+
+# train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True, num_workers=4, pin_memory=True)
+# valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False, num_workers=4, pin_memory=True)
+# test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False, num_workers=4, pin_memory=True)
 
 gc.collect()
 
@@ -706,8 +766,10 @@ optimizer = optim.Adam([
 
 
 # Training loop
-file_path = "ticl/output.txt"
-EPOCHS = 25
+output_folder = "ticp/"
+os.makedirs(os.path.dirname(output_folder), exist_ok=True)
+
+EPOCHS = 2
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
     valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_img = evaluate_model(model, valid_loader, criterion)
@@ -719,14 +781,16 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Validation Accuracy Images:  {valid_accuracy_sent:.4f}')
     print(f'Validation F1 Sentences:  {valid_f1_sent:.4f}')
     print(f'Validation F1 Images:  {valid_f1_img:.4f}')
-    checkpoint_path = "ticl/ticl.pth"
+
+    checkpoint_path = output_folder + "checkpoint.pth"
     torch.save({'epoch': epoch,                        # Current epoch
     'model_state_dict': model.state_dict(), # Model parameters
     'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
 
-    test_sent_accuracy, test_img_accuracy, test_sent_f1, test_img_f1 = test_model(model, test_loader)
+    test_sent_accuracy, test_img_accuracy, test_sent_f1, test_img_f1 = test_model(model, test_loader, output_folder)
     test_sent_accuracy = test_sent_accuracy * 100
     test_img_accuracy = test_img_accuracy * 100
+
     print(f'Test Sent Accuracy: {test_sent_accuracy:.4f}')
     print(f'Test  Image Accuracy: {test_img_accuracy:.4f}')
     print(f'Test Sent F1: {test_sent_f1:.4f}')
@@ -734,4 +798,4 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
 
 
 
-    log_epoch_info(file_path, epoch, train_loss, valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_sent, test_sent_accuracy, test_sent_f1, test_img_accuracy, test_img_f1)
+    log_epoch_info_text_img(output_folder, epoch, train_loss, valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_img, test_sent_accuracy, test_sent_f1, test_img_accuracy, test_img_f1)

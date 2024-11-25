@@ -14,6 +14,7 @@ from torch import nn
 from transformers import XLNetTokenizer, XLNetModel, TransfoXLModel
 from transformers import BertTokenizer, BertModel
 from transformers import LongformerTokenizer, LongformerModel
+from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModel
 import torch.optim as optim
 import pandas as pd
 from tqdm import tqdm
@@ -21,9 +22,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from entmax import sparsemax, entmax15
 import numpy as np
-from Visual_embeddings import create_vis_embs
+# from Visual_embeddings import create_vis_embs
 from helper import *
 from sklearn.metrics import f1_score
+from itertools import chain
+
+
 
 # os.environ["CUDA_VISIBLE_DEVICES"]="6"
 
@@ -34,7 +38,7 @@ warnings.filterwarnings("ignore")
 
 print(torch.cuda.is_available())
 if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:6")
+    DEVICE = torch.device("cuda:1")
     print("Using GPU")
 else:
     DEVICE = torch.device("cpu")
@@ -52,35 +56,53 @@ else:
 #         self.model = BertModel.from_pretrained(model_name)
 
 class EncodingFramework(nn.Module):
-    def __init__(self, model_name='allenai/longformer-base-4096'):
+    def __init__(self, model_name='neuml/pubmedbert-base-embeddings'):
         super(EncodingFramework, self).__init__()
-        self.tokenizer = LongformerTokenizer.from_pretrained(model_name)
-        self.model = LongformerModel.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name)
+        self.chunk_size = 512
         self.projection_layer = nn.Linear(768, embedding_dim)  # Projection layer to 1024
     def forward(self, text):
         # Tokenize the input while keeping special tokens intact
         self.tokenizer.add_special_tokens({'additional_special_tokens': ['[CSEP]', '[SEP]', '[CLS]']})
         self.model.resize_token_embeddings(len(self.tokenizer))
-        tokens = self.tokenizer(text, add_special_tokens=True, return_tensors="pt",max_length=2200,truncation=True,padding='max_length')
+        tokens = self.tokenizer(text, add_special_tokens=True, return_tensors="pt")
         # tokens = self.tokenizer(text, add_special_tokens=True, return_tensors="pt",max_length=2200,truncation=True,padding='max_length')
         token_cls = self.tokenizer("[CLS]", add_special_tokens = True, return_tensors = "pt")
         # Get tokenized IDs
-        input_ids = tokens['input_ids']
+        # input_ids = tokens['input_ids']
+        input_ids = tokens['input_ids'].squeeze(0)
+        # Divide input_ids into chunks of size `chunk_size`
+        input_chunks = input_ids.split(self.chunk_size)
+        token_embeddings_list = []
+        cls_embeddings_list = []
+        for chunk in input_chunks:
+            chunk = chunk.unsqueeze(0).to(DEVICE)  # Add batch dimension for model processing
+            outputs = self.model(input_ids=chunk)
+            # Collect CLS and token embeddings for each chunk
+            token_embeddings_list.append(outputs.last_hidden_state)
+            cls_embeddings_list.append(outputs.last_hidden_state[:, 0, :])
+        
+        # Concatenate chunk embeddings
+        token_embeddings = torch.cat(token_embeddings_list, dim=1)  # Combine along sequence dimension
+        cls_embeddings = torch.cat(cls_embeddings_list, dim=0)  # Combine CLS embeddings from each chunk
+
         input_ids_cls = token_cls['input_ids']
 
-        input_ids = input_ids.to(DEVICE)
+        # input_ids = input_ids.to(DEVICE)
         input_ids_cls = input_ids_cls.to(DEVICE)
 
-        outputs = self.model(input_ids=input_ids)
+        # outputs = self.model(input_ids=input_ids)
         output_cls = self.model(input_ids=input_ids_cls)
 
         # Get the token embeddings (output hidden states)
-        token_embeddings = outputs.last_hidden_state.detach().cpu()
+        # token_embeddings = outputs.last_hidden_state.detach().cpu()
         cls_embeddings = output_cls.last_hidden_state.detach().cpu()
+        
         token_embeddings = self.projection_layer(token_embeddings.to(DEVICE))
         cls_embeddings = self.projection_layer(cls_embeddings.to(DEVICE))
 
-        total_tokens = input_ids.size(1)
+        total_tokens = input_ids.unsqueeze(0).size(1)
 
         # Define separator tokens
         separators = ["[SEP]", "[CSEP]"]
@@ -90,7 +112,7 @@ class EncodingFramework(nn.Module):
         # Find positions of each separator in the tokenized input
         separator_positions = {sep: [] for sep in separators}
         for sep, token_id in zip(separators, separator_ids):
-            pos = (input_ids == token_id).nonzero(as_tuple=True)[1].tolist()
+            pos = (input_ids == token_id).nonzero(as_tuple=True)[0].tolist()
             separator_positions[sep] = pos
 
         # Split the paragraph by the [CSEP] token to get dynamic contents
@@ -113,7 +135,7 @@ class EncodingFramework(nn.Module):
             content_ids.append(content_tokens)
             positions = []
             for token_id in content_tokens[0]:
-                pos = (input_ids == token_id.item()).nonzero(as_tuple=True)[1].tolist()
+                pos = (input_ids == token_id.item()).nonzero(as_tuple=True)[0].tolist()
                 if pos:
                     positions.append(pos[0])
             content_positions.append(positions)
@@ -172,9 +194,6 @@ class TransformerXLFramework(nn.Module):
             # Update memory with the current chunk's memory, move memory to GPU for next iteration
             memory = [mem.to(DEVICE) for mem in transformer_xl_output.mems]
 
-            # Clear the chunk_encodings and output from GPU memory after use
-            del chunk_encodings, transformer_xl_output
-              # Free unused memory
 
         # Concatenate all chunk embeddings along the sequence dimension
         transformer_xl_embeddings = torch.cat(transformer_xl_embeddings, dim=1)
@@ -316,7 +335,8 @@ def train_model(model, train_loader, criterion, optimizer):
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
 
-            loss = criterion(padded_logits, padded_labels)
+            one_labels, one_logits, loss = only_one_loss(padded_labels, padded_logits, DEVICE)
+            # loss = criterion(one_labels, one_logits)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -370,21 +390,24 @@ def evaluate_model(model, valid_loader, criterion):
             padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
-            loss = criterion(padded_logits, padded_labels)
-
+            one_labels, one_logits, loss = only_one_loss(padded_labels, padded_logits, DEVICE)
+            # loss = criterion(one_labels, one_logits)
             total_loss += loss.item()
-            accuracy_sample += calc_accuracy(padded_logits, padded_labels)
-            f1_score_sample = f1_score_sample + f1_score(padded_labels.cpu(), padded_logits.cpu(), average='macro')  # Use 'micro' or 'weighted' as needed
+            acc, f1 = calc_accuracy(one_labels, one_logits, type = 'micro')
+            accuracy_sample += acc
+            f1_score_sample += f1
 
     
     c = c + 1
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
     return total_loss / (len(valid_loader) - num_excl), accuracy_sample / (len(valid_loader) - num_excl), f1_score_sample / (len(valid_loader) - num_excl)
 
-def test_model(model, test_loader):
+def test_model(model, test_loader, output_folder):
     model.eval()
     accuracy_sample, f1_score_sample = 0, 0
+    all_pred_ans, all_true_ans, all_ques = [],[],[]
     c, num_excl = 0, 0
+    total_loss = 0
     with torch.no_grad():
         for texts, imgs, labels in tqdm(test_loader):
 
@@ -419,16 +442,31 @@ def test_model(model, test_loader):
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
 
-            accuracy_sample += calc_accuracy(padded_logits, padded_labels)
-            f1_score_sample = f1_score_sample + f1_score(padded_labels.cpu(), padded_logits.cpu(), average='macro')  # Use 'micro' or 'weighted' as needed
+            one_labels, one_logits, loss = only_one_loss(padded_labels, padded_logits, DEVICE)
+            # loss = criterion(one_labels, one_logits)
+            total_loss += loss.item()
+            acc, f1 = calc_accuracy(one_labels, one_logits, type = 'micro')
+            accuracy_sample += acc
+            f1_score_sample += f1
 
-    
+            pred_answers, true_answers, questions = gen_answer(padded_logits,labels, texts)
+            all_pred_ans.append(pred_answers)
+            all_true_ans.append(true_answers)
+            all_ques.append(questions)
+        
+
+    all_pred_ans = list(chain.from_iterable(all_pred_ans))
+    all_true_ans = list(chain.from_iterable(all_true_ans))
+    all_ques = list(chain.from_iterable(all_ques))
+    df = pd.DataFrame({'Question': all_ques, "True Answer": all_true_ans, "Predicted Answer": all_pred_ans})
+    output_filepath = output_folder + "predictions.csv"
+    df.to_csv(output_filepath, index = False)
     c = c + 1
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
     return accuracy_sample / (len(test_loader) - num_excl), f1_score_sample / (len(test_loader) - num_excl)
 
 # --------------------------------------------------------------------------------------------------------------------------------
-'''
+''' 
 context_qa_list: 
     -type: list
     -contents: individual dictionaries of the form {[Context 1]: context,
@@ -478,8 +516,8 @@ embedding_dim = 1024 # This is the embeddings dimension of each of transfoxl_emb
 hidden_size = 512
 image_size = 1024
 
-num = len(list(QID_context.values()))
-# num = 10
+# num = len(list(QID_context.values()))
+num =30
 labels = []
 corr_context = list(QID_context.values())[:num]
 corr_ans = list(QID_ans.values())[:num]
@@ -524,16 +562,13 @@ valid_dataset = CustomDataset(valid_texts, valid_img, valid_labels)
 test_dataset = CustomDataset(test_texts, test_img, test_labels)
 
 batch_size = 4
-# train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=True)
-# valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False)
-# test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=True)
+valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False)
+# train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=True, num_workers=4, pin_memory=True)
+# valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False, num_workers=4, pin_memory=True)
+# test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False, num_workers=4, pin_memory=True)
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=True, num_workers=4, pin_memory=True)
-valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False, num_workers=4, pin_memory=True)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False, num_workers=4, pin_memory=True)
-
-torch.save(test_dataset, "til/test_dataset.pt")
-breakpoint()
 
 # Define the model, criterion, and optimizer
 framework = EncodingFramework()
@@ -582,17 +617,13 @@ optimizer = optim.Adam([
             pos_seq = torch.arange(klen - 1, -1, -1.0, device=word_emb.device, dtype=torch.int64).type_as(word_emb)
 ''' 
 
-# wandb.login()
-# wandb.init(project='MEDQA-IMG',)
-# wandb.config = {
-#   "learning_rate": 1e-5,
-#   "epochs": 10,
-#   "batch_size": 4
-# }
 
-# Training loop
-file_path = "til/output.txt"
+import os
+
 EPOCHS = 25
+output_folder = "tip/"
+os.makedirs(os.path.dirname(output_folder), exist_ok=True)
+
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
     valid_loss, valid_accuracy, valid_f1 = evaluate_model(model, valid_loader, criterion)
@@ -601,19 +632,20 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Train Loss: {train_loss:.4f}')
     print(f'Validation Loss: {valid_loss:.4f}')
     print(f'Validation Accuracy: {valid_accuracy:.4f}')
+    print(f'Validation F1: {valid_f1:.4f}')
     
-    checkpoint_path = "til/til.pth"
+    checkpoint_path = output_folder + "checkpoint.pth"
     torch.save({'epoch': epoch,                        # Current epoch
     'model_state_dict': model.state_dict(), # Model parameters
     'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
 
-    test_accuracy, test_f1 = test_model(model, test_loader)
+    test_accuracy, test_f1 = test_model(model, test_loader, output_folder)
     test_accuracy = test_accuracy * 100
     print(f'Test Accuracy: {test_accuracy:.4f}')
     print(f'Test F1: {test_f1:.4f}')
 
 
-    log_epoch_info_3(file_path, epoch, train_loss, valid_loss, valid_accuracy, valid_f1, test_accuracy, test_f1)
+    log_epoch_info_3(output_folder, epoch, train_loss, valid_loss, valid_accuracy, valid_f1, test_accuracy, test_f1)
 
 print(f'Test Accuracy: {test_accuracy:.4f}')
 print(f'Test F1: {test_f1:.4f}')
