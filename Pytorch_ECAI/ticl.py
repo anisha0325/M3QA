@@ -1,4 +1,3 @@
- 
 import random
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
@@ -103,7 +102,7 @@ class EncodingFramework(nn.Module):
 
         # Tokenize each content part individually (for dynamic content)
         content_ids = []
-        content_positions = []
+      /raid/biplab/sarthak/MedQA/Pytorch_ECAI/til  content_positions = []
         for content in contents:
             content_tokens = self.tokenizer(content, add_special_tokens=False, return_tensors="pt")['input_ids']
             content_ids.append(content_tokens)
@@ -564,10 +563,10 @@ train_dataset = CustomDataset(train_texts, train_img, train_labels, train_img_la
 valid_dataset = CustomDataset(valid_texts, valid_img, valid_labels, valid_img_labels)
 test_dataset = CustomDataset(test_texts, test_img, test_labels, test_img_labels)
 
-batch_size = 4
-train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True, num_workers=4, pin_memory=True)
-valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False, num_workers=4, pin_memory=True)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False, num_workers=4, pin_memory=True)
+batch_size = 8
+train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
+valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 
 
 

@@ -20,3 +20,4 @@ image_embeddings.pkl
 *.out
 *.csv
 Pytorch_ECAI/question_image_dict.pkl
+*.pth

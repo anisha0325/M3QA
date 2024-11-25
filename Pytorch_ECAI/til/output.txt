@@ -1,0 +1,4 @@
+Epoch: 0, Train_loss: 5.3099, Valid_loss: 6.4214, Valid_sentence_accuracy: 0.9358%
+Epoch: 1, Train_loss: 5.2895, Valid_loss: 5.8194, Valid_sentence_accuracy: 0.9418%
+Epoch: 2, Train_loss: 5.2723, Valid_loss: 5.8010, Valid_sentence_accuracy: 0.9420%
+Epoch: 3, Train_loss: 5.2102, Valid_loss: 5.9309, Valid_sentence_accuracy: 0.9407%
