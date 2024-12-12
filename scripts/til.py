@@ -17,6 +17,7 @@ from transformers import LongformerTokenizer, LongformerModel
 import torch.optim as optim
 import pandas as pd
 from tqdm import tqdm
+from itertools import chain
 import torch.nn as nn
 import torch.nn.functional as F
 from entmax import sparsemax, entmax15
@@ -34,7 +35,7 @@ warnings.filterwarnings("ignore")
 
 print(torch.cuda.is_available())
 if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:4")
+    DEVICE = torch.device("cuda:2")
     print("Using GPU")
 else:
     DEVICE = torch.device("cpu")
@@ -279,8 +280,6 @@ def train_model(model, train_loader, criterion, optimizer):
     total_loss = 0
     c, num_excl = 0, 0
     for texts, imgs, labels in tqdm(train_loader):
-
-        optimizer.zero_grad()
         # Forward pass
         encodings = [framework.forward(text) for text in texts]
 
@@ -311,12 +310,14 @@ def train_model(model, train_loader, criterion, optimizer):
             attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
 
             predictions = [classification_head(vectors) for vectors in attended_sentence_output]
-            logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
+            logits = convert_tensor([(pred> 0.49).float() for pred in predictions])
             padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
 
             loss = criterion(padded_logits, padded_labels)
+            # Backward pass and optimization
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -335,7 +336,7 @@ def train_model(model, train_loader, criterion, optimizer):
 def evaluate_model(model, valid_loader, criterion):
     model.eval()
     total_loss = 0
-    accuracy_sample, f1_score_sample = 0, 0
+    accuracy_sample, f1_score_sample, exact_match = 0, 0, 0
     c, num_excl = 0, 0
     with torch.no_grad():
         for texts, imgs, labels in tqdm(valid_loader):
@@ -366,25 +367,26 @@ def evaluate_model(model, valid_loader, criterion):
             attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
     
             predictions = [classification_head(vectors) for vectors in attended_sentence_output]
-            logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
+            logits = convert_tensor([(pred> 0.49).float() for pred in predictions])
             padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
             loss = criterion(padded_logits, padded_labels)
 
             total_loss += loss.item()
-            acc, f1 = calc_accuracy(padded_logits, padded_labels)
+            acc, f1, em = calc_accuracy(padded_labels, padded_logits, DEVICE = DEVICE)
             accuracy_sample += acc
             f1_score_sample += f1
+            exact_match += em
     
     c = c + 1
-    breakpoint()
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
-    return total_loss / len(valid_loader), accuracy_sample / len(valid_loader), f1_score_sample / len(valid_loader)
+    return total_loss / (len(valid_loader) - num_excl), accuracy_sample / (len(valid_loader) - num_excl), f1_score_sample / (len(valid_loader) - num_excl), exact_match / (len(valid_loader) - num_excl)
 
 def test_model(model, test_loader, output_folder):
     model.eval()
-    accuracy_sample, f1_score_sample = 0, 0
+    all_pred_ans, all_true_ans, all_ques = [], [], []
+    accuracy_sample, f1_score_sample, exact_match = 0, 0, 0
     c, num_excl = 0, 0
     with torch.no_grad():
         for texts, imgs, labels in tqdm(test_loader):
@@ -415,14 +417,26 @@ def test_model(model, test_loader, output_folder):
             attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
     
             predictions = [classification_head(vectors) for vectors in attended_sentence_output]
-            logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
+            logits = convert_tensor([(pred> 0.49).float() for pred in predictions])
             padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
 
-            acc, f1 = calc_accuracy(padded_logits, padded_labels)
+            acc, f1, em = calc_accuracy(padded_labels, padded_logits, DEVICE = DEVICE)
             accuracy_sample += acc
             f1_score_sample += f1
+            exact_match += em
+
+
+            pred_answers, true_answers, questions = gen_answer(padded_logits,labels, texts)
+
+            bs, meteor, rouge, bleu = calc_semantic(true_answers, pred_answers)
+
+
+            bs_sum += bs
+            meteor_sum += meteor
+            rouge_sum += rouge
+            bleu_sum += bleu
 
             pred_answers, true_answers, questions = gen_answer(padded_logits,labels, texts)
             all_pred_ans.append(pred_answers)
@@ -439,7 +453,9 @@ def test_model(model, test_loader, output_folder):
     
     c = c + 1
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
-    return accuracy_sample / len(test_loader), f1_score_sample / len(test_loader)
+    print(f"Bert Score: {bs / (len(test_loader) - num_excl)}, Meteor: {meteor / (len(test_loader) - num_excl)}, Rouge: {rouge / (len(test_loader) - num_excl)}, BLEU: {bleu / (len(test_loader) - num_excl)}")
+
+    return accuracy_sample / (len(test_loader) - num_excl), f1_score_sample / (len(test_loader) - num_excl), exact_match / (len(test_loader) - num_excl)
 
 # --------------------------------------------------------------------------------------------------------------------------------
 '''
@@ -492,8 +508,8 @@ embedding_dim = 1024 # This is the embeddings dimension of each of transfoxl_emb
 hidden_size = 512
 image_size = 1024
 
-# num = len(list(QID_context.values()))
-num = 100
+num = len(list(QID_context.values()))
+# num = 20
 labels = []
 corr_context = list(QID_context.values())[:num]
 corr_ans = list(QID_ans.values())[:num]
@@ -537,7 +553,7 @@ train_dataset = CustomDataset(train_texts, train_img, train_labels)
 valid_dataset = CustomDataset(valid_texts, valid_img, valid_labels)
 test_dataset = CustomDataset(test_texts, test_img, test_labels)
 
-batch_size = 4
+batch_size = 8
 train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=True)
 valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False)
@@ -599,31 +615,35 @@ optimizer = optim.Adam([
 output_folder = "til/"
 os.makedirs(os.path.dirname(output_folder), exist_ok=True)
 
-EPOCHS = 2
+EPOCHS = 5
 
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
-    valid_loss, valid_accuracy, valid_f1 = evaluate_model(model, valid_loader, criterion)
+    valid_loss, valid_accuracy, valid_f1, valid_em = evaluate_model(model, valid_loader, criterion)
 
     print(f'Epoch {epoch+1}/{EPOCHS}')
     print(f'Train Loss: {train_loss:.4f}')
     print(f'Validation Loss: {valid_loss:.4f}')
     print(f'Validation Accuracy: {valid_accuracy:.4f}')
-    
+    print(f'Validation F1: {valid_f1:.4f}')
+    print(f'Validation Exact Match: {valid_em:.4f}')
+
     checkpoint_path = output_folder + "checkpoint.pth"
     torch.save({'epoch': epoch,                        # Current epoch
     'model_state_dict': model.state_dict(), # Model parameters
     'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
 
-    test_accuracy, test_f1 = test_model(model, test_loader, output_folder)
+    test_accuracy, test_f1, test_em = test_model(model, test_loader, output_folder)
     test_accuracy = test_accuracy * 100
     print(f'Test Accuracy: {test_accuracy:.4f}')
     print(f'Test F1: {test_f1:.4f}')
+    print(f'Test Exact match: {test_em:.4f}')
 
 
     log_epoch_info_3(output_folder, epoch, train_loss, valid_loss, valid_accuracy, valid_f1, test_accuracy, test_f1)
 
 print(f'Test Accuracy: {test_accuracy:.4f}')
 print(f'Test F1: {test_f1:.4f}')
+print(f'Test Exact match: {test_em:.4f}')
 
 # wandb.finish()

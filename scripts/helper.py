@@ -20,6 +20,18 @@ import warnings
 import gc
 import pickle
 import sys #,wandb
+from torchmetrics.classification import MulticlassExactMatch
+from transformers import BertTokenizer, BertForMaskedLM, BertModel
+from bert_score import BERTScorer
+from nltk.translate.meteor_score import meteor_score 
+from rouge_score import rouge_scorer
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+import nltk
+nltk.download('wordnet')
+
+
+
+
 
 def set_random_seed(seed: int):
     """
@@ -146,24 +158,27 @@ def apply_self_attention(context_sentences_emb_list, self_attention_layer, DEVIC
     else:
         max_seq_len = max([len(content_embedding) for content_embedding in context_sentences_emb_list])
         for context_sentence, attention_mask in zip(context_sentences_emb_list, transfoxl_attention_masks):
-            # print(len(context_sentence))
-            context_sentence_embedding_tensor = torch.stack(context_sentence).to(DEVICE)  # Shape: (seq_len, embedding_dim)
-            
-            # Apply self-attention over the encoded words of the sentence
-            attended_output = self_attention_layer(context_sentence_embedding_tensor.unsqueeze(0))  # Shape: (1, seq_len, embedding_dim)
-            
-            # Step 2: Apply mean pooling to obtain fixed-length sentence vector
-            pooled_output, padded_mask = mean_pooling(attended_output.squeeze(0), attention_mask, max_seq_len) 
-            # print(pooled_output.shape, padded_mask.shape)
-            fixed_length_sentence_vectors.append(pooled_output)
-            padded_masks.append(padded_mask)
+            if len(context_sentence) != 0:
+                context_sentence_embedding_tensor = torch.stack(context_sentence).to(DEVICE)  # Shape: (seq_len, embedding_dim)
+                
+                # Apply self-attention over the encoded words of the sentence
+                attended_output = self_attention_layer(context_sentence_embedding_tensor.unsqueeze(0))  # Shape: (1, seq_len, embedding_dim)
+                
+                # Step 2: Apply mean pooling to obtain fixed-length sentence vector
+                pooled_output, padded_mask = mean_pooling(attended_output.squeeze(0), attention_mask, max_seq_len) 
+                # print(pooled_output.shape, padded_mask.shape)
+                fixed_length_sentence_vectors.append(pooled_output)
+                padded_masks.append(padded_mask)
             # except:
             #     pass
         del transfoxl_attention_masks
         del context_sentences_emb_list
         gc.collect()
         torch.cuda.empty_cache()
-        return torch.stack(fixed_length_sentence_vectors), torch.stack(padded_masks)
+        try:
+            return torch.stack(fixed_length_sentence_vectors), torch.stack(padded_masks)
+        except:
+            return torch.tensor([]), torch.tensor([])
 
 
 
@@ -223,17 +238,23 @@ def pad_tensor_lists(tensor_list1, tensor_list2):
 
 
 # Step 1: Accuracy Calculation
-def calc_accuracy(labels, preds, type = 'weighted'):
-    acc, f1 = 0, 0
+def calc_accuracy(labels, preds, DEVICE, type = 'weighted'):
+    acc, f1, exact_match = 0, 0, 0
+    metric = MulticlassExactMatch(num_classes = 2).to(DEVICE)
     for pred, label in zip(preds, labels):
-        acc += accuracy_score(label.cpu(), pred.cpu())
-        f1 += f1_score(label.cpu(), pred.cpu(), average=type)
+        new_label = label.cpu().detach().numpy()
+        new_pred = pred.cpu().detach().numpy()
+        # acc += accuracy_score(label.cpu(), pred.cpu())
+        # f1 += f1_score(label.cpu(), pred.cpu(), average=type)
+        acc += accuracy_score(new_label, new_pred)
+        f1 += f1_score(new_label, new_pred, average=type)
+        exact_match += metric(label, pred)
         # print(classification_report(label.cpu(), pred.cpu()))
         # print(classification_report(label.cpu(), pred.cpu()))
     # correct = torch.eq(preds, labels).sum().item()  # Count correct predictions
     # total = torch.numel(labels)
     gc.collect()
-    return acc / len(preds), f1 / len(preds)
+    return acc / len(preds), f1 / len(preds), exact_match / len(preds)
 
 def log_epoch_info_text_img(file_path, epoch, train_loss, valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_img, test_sent_accuracy, test_sent_f1, test_img_accuracy, test_img_f1):
     # Open the file in append mode ('a') to keep adding lines without overwriting
@@ -247,7 +268,7 @@ def log_epoch_info(file_path, epoch_num, train_loss, valid_loss, valid_sent_accu
     with open(file_path, 'a') as f:
         f.write(f"Epoch: {epoch_num}, Train_loss: {train_loss:.4f}, Valid_loss: {valid_loss:.4f}, Valid_sentence_accuracy: {valid_sent_accuracy:.4f}, Valid_image_accuracy: {valid_img_accuracy:.4f}, Test_sentence_accuracy: {test_sent_acc:.4f}, Test_image_accuracy: {test_img_acc:.4f}%\n")
 def log_epoch_info_3(file_path, epoch_num, train_loss, valid_loss, valid_accuracy, valid_f1, test_accuracy, test_f1):
-
+    file_path = file_path + "epoch_info.txt"
     # Open the file in append mode ('a') to keep adding lines without overwriting
     with open(file_path, 'a') as f:
         f.write(f"Epoch: {epoch_num}, Train_loss: {train_loss:.4f}, Valid_loss: {valid_loss:.4f}, Valid_accuracy: {valid_accuracy:.4f}, Valid_F1: {valid_f1:.4f}, Test_accuracy: {test_accuracy:.4f}, Test_F1: {test_f1:.4f}%\n")
@@ -275,17 +296,19 @@ def attended_sentence_cls(self_attended_sentence_vectors, transfoxl_sep_embs, ma
     new_vec, new_mask = [], []
     linear_layer = nn.Linear(2048, 1024).to(DEVICE)
     for i in range(len(self_attended_sentence_vectors)):
-        # try:
-        tensor_a = self_attended_sentence_vectors[i]
-        # breakpoint()
-        tensor_b = transfoxl_sep_embs[i]['[CLS]'][0].to(DEVICE)
-        n, m, _ = tensor_a.shape
-        # Expand tensor_b to match the dimensions of tensor_a for concatenation
-        tensor_b_expanded = tensor_b.unsqueeze(0).unsqueeze(0).expand(n, m, -1)
+        try:
+            tensor_a = self_attended_sentence_vectors[i]
+            # breakpoint()
+            tensor_b = transfoxl_sep_embs[i]['[CLS]'][0].to(DEVICE)
+            n, m, _ = tensor_a.shape
+            # Expand tensor_b to match the dimensions of tensor_a for concatenation
+            tensor_b_expanded = tensor_b.unsqueeze(0).unsqueeze(0).expand(n, m, -1)
 
-        # Concatenate along the last dimension
-        result = torch.cat((tensor_a, tensor_b_expanded), dim=-1)
-        new_vec.append(linear_layer(result))
+            # Concatenate along the last dimension
+            result = torch.cat((tensor_a, tensor_b_expanded), dim=-1)
+            new_vec.append(linear_layer(result))
+        except:
+            pass
 
 
         del tensor_a
@@ -359,7 +382,7 @@ def concat_images(tensor_list, DEVICE):
     sequence = sequence[:-1] + [icls_embedding]
     # Concatenate into one tensor of shape [(n * 2) - 1, 1024]
     final_sequence = torch.cat(sequence, dim=0)
-    return final_sequence
+    return final_sequence.to('cpu')
 
 def only_one_loss(labels,logits, DEVICE):
     one_labels, one_logits = [], []
@@ -425,3 +448,69 @@ def gen_answer(logits, labels, texts):
         questions.append(question)
 
     return pred_answers, true_answers, questions
+
+def gen_images(logits, labels, texts, QID_ques, QID_img):
+    pred_images = []
+    true_images = []
+    QIDs = []
+    for logit, label, text in zip(logits, labels, texts): 
+        # Split the paragraph by the [CSEP] token to get dynamic contents
+        all_separated = text.split("[SEP]")
+        question = all_separated[0]
+
+        QID = [key for key, value in QID_ques.items() if value == question]
+
+        images =QID_img[QID]
+
+        selected_indices = torch.nonzero(logit == 1.0, as_tuple=True)[0].tolist()
+        if len(selected_indices) == 0:
+            pred_img = []
+        else:
+            pred_img = [images[i] for i in selected_indices]   
+        pred_images.append(pred_img)    
+
+        selected_indices = torch.nonzero(label == 1.0, as_tuple=True)[0].tolist()
+        if len(selected_indices) == 0:
+            true_img = []
+        else:
+            true_img = [images[i] for i in selected_indices]   
+        true_images.append(true_img)
+
+        QIDs.append(QID)
+
+    return QIDs, true_images, pred_images  
+
+
+def calc_semantic(reference_list, candidate_list):
+
+    avg_bs, avg_meteor, avg_rouge, avg_bleu = 0, 0, 0, 0
+
+    # Initialize ROUGE scorer
+    rouge = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+
+    for reference, candidate in zip(reference_list, candidate_list):
+        # BERTScore calculation
+        scorer = BERTScorer(model_type='bert-base-uncased')
+        P, R, F1 = scorer.score([candidate], [reference])
+        avg_bs += F1.mean()
+
+        #METEOR calculation
+        score = meteor_score([reference.split()], candidate.split()) 
+        avg_meteor += score
+
+        #ROUGE-L calculation
+        scores = rouge.score(reference, candidate)
+        # avg_rouge += scores['rougeL']
+
+        #BLEU calculation
+        reference = [reference.split()]
+        candidate = candidate.split()
+
+        # Calculate BLEU score
+        smooth = SmoothingFunction().method1
+        score = sentence_bleu(reference, candidate, smoothing_function=smooth)
+        avg_bleu += score
+
+
+
+    return avg_bs / len(reference_list), avg_meteor / len(reference_list), avg_rouge / len(reference_list), avg_bleu / len(reference_list)

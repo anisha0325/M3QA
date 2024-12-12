@@ -577,25 +577,22 @@ def test_model(model, test_loader, output_folder, QID_ques):
             rouge_sum += rouge
             bleu_sum += bleu
 
-            # QID, true_images, pred_images = gen_images(padded_logits_img, img_labels, texts, QID_ques, QID_img)
-            # all_pred_imgs.append(pred_images)
-            # all_true_imgs.append(true_images)
-            # all_QID.append(QID)
+            QID, true_images, pred_images = gen_images(padded_logits_img, img_labels, texts, QID_ques, QID_img)
+            all_pred_imgs.append(pred_images)
+            all_true_imgs.append(true_images)
+            all_QID.append(QID)
         
 
     all_pred_ans = list(chain.from_iterable(all_pred_ans))
     all_true_ans = list(chain.from_iterable(all_true_ans))
     all_ques = list(chain.from_iterable(all_ques))
-    # all_pred_imgs = list(chain.from_iterable(all_pred_imgs))
-    # all_true_imgs = list(chain.from_iterable(all_true_imgs))
-    # all_QID = list(chain.from_iterable(all_QID))
+    all_pred_imgs = list(chain.from_iterable(all_pred_imgs))
+    all_true_imgs = list(chain.from_iterable(all_true_imgs))
+    all_QID = list(chain.from_iterable(all_QID))
 
-    # df = pd.DataFrame({'QID': all_QID, 'Question': all_ques, "True Answer": all_true_ans, 
-    #                    "Predicted Answer": all_pred_ans, "True Images": all_true_imgs,
-    #                    "Predicted Images": all_pred_imgs})
-
-    df = pd.DataFrame({'Question': all_ques, "True Answer": all_true_ans, 
-                    "Predicted Answer": all_pred_ans})
+    df = pd.DataFrame({'QID': all_QID, 'Question': all_ques, "True Answer": all_true_ans, 
+                       "Predicted Answer": all_pred_ans, "True Images": all_true_imgs,
+                       "Predicted Images": all_pred_imgs})
     
     output_filepath = output_folder + "predictions.csv"
     df.to_csv(output_filepath, index = False)
@@ -652,8 +649,8 @@ embedding_dim = 1024 # This is the embeddings dimension of each of transfoxl_emb
 hidden_size = 512
 image_size = 1024
 
-num = len(list(QID_context.values()))
-# num = 20
+# num = len(list(QID_context.values()))
+num = 20
 labels = []
 corr_context = list(QID_context.values())[:num]
 corr_ans = list(QID_ans.values())[:num]
@@ -714,7 +711,7 @@ train_dataset = CustomDataset(train_texts, train_img, train_labels, train_img_la
 valid_dataset = CustomDataset(valid_texts, valid_img, valid_labels, valid_img_labels)
 test_dataset = CustomDataset(test_texts, test_img, test_labels, test_img_labels)
 
-batch_size = 8
+batch_size = 2
 # train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
 # valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 # test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
@@ -775,7 +772,7 @@ optimizer = optim.Adam([
 
 # Training loop
 output_folder = "ticl/"
-EPOCHS = 5
+EPOCHS =1
 os.makedirs(os.path.dirname(output_folder), exist_ok=True)
 
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
@@ -808,4 +805,4 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Test Sent EM: {test_sent_em:.4f}')
     print(f'Test Image EM: {test_img_em:.4f}')
 
-    log_epoch_info_text_img(output_folder, epoch, train_loss, valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_sent, test_sent_accuracy, test_sent_f1, test_img_accuracy, test_img_f1)
+    log_epoch_info(output_folder, epoch, train_loss, valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_sent, test_sent_accuracy, test_sent_f1, test_img_accuracy, test_img_f1)

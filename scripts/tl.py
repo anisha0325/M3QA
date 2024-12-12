@@ -8,6 +8,7 @@ from torch import nn
 from transformers import XLNetTokenizer, XLNetModel, TransfoXLModel
 from transformers import BertTokenizer, BertModel
 from transformers import LongformerTokenizer, LongformerModel
+from itertools import chain
 import torch.optim as optim
 import pandas as pd
 from tqdm import tqdm
@@ -24,6 +25,7 @@ import pickle
 import sys #,wandb
 from helper import *
 from sklearn.metrics import f1_score
+
 # os.environ["CUDA_VISIBLE_DEVICES"]="0"
 
 # 5 --> 500 (new)
@@ -39,7 +41,7 @@ warnings.filterwarnings("ignore")
 
 print(torch.cuda.is_available())
 if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:4")
+    DEVICE = torch.device("cuda:6")
     print("Using GPU")
 else:
     DEVICE = torch.device("cpu")
@@ -140,21 +142,6 @@ class CustomDataset(Dataset):
         gc.collect()
         return text
     
-# Define collate function
-def collate_fn(batch):
-    texts, labels = zip(*batch)
-    # texts_padded = pad_sequence(texts, batch_first=True, padding_value=tokenizer.pad_token_id)
-
-    # Determine the maximum length of labels in the batch
-    max_label_length = max(len(label) for label in labels)
-
-    # Pad labels
-    labels_padded = torch.full((len(labels), max_label_length), fill_value=0, dtype=torch.long)  # Using -1 as padding value
-    for i, label in enumerate(labels):
-        labels_padded[i, :len(label)] = torch.tensor(label, dtype=torch.long)
-    gc.collect()
-    return texts, labels_padded
-
 
 class TransformerXLFramework(nn.Module):
     def __init__(self, model_name="transfo-xl/transfo-xl-wt103"):
@@ -223,63 +210,6 @@ class SelfAttentionLayer(nn.Module):
         attended_output = torch.matmul(attention_weights, V)
         return attended_output
     
-# Function to apply mean pooling and handle padding for a single sentence
-def mean_pooling(sequence_output, attention_mask, max_sequence_length):
-    # Step 1: Pad the sequence_output to max_sequence_length
-    pad_size = max_sequence_length - sequence_output.size(0)
-    
-    if pad_size > 0:
-        # Pad sentence and attention mask
-        padded_sentence = torch.cat([sequence_output, torch.zeros((pad_size, sequence_output.size(1)), device=sequence_output.device)], dim=0)
-        padded_mask = torch.cat([attention_mask, torch.zeros(pad_size, device=attention_mask.device)], dim=0)
-    else:
-        padded_sentence = sequence_output
-        padded_mask = attention_mask
-    
-    # Step 2: Create a mean-pooled output that maintains shape (max_seq_len, embedding_dim)
-    input_mask_expanded = padded_mask.unsqueeze(-1).expand(padded_sentence.size()).float()
-    
-    # Initialize the mean-pooled output
-    mean_pooled_output = torch.zeros((max_sequence_length, padded_sentence.size(1)), device=padded_sentence.device)
-    
-    # Compute mean embeddings for valid tokens
-    for i in range(max_sequence_length):
-        if i < padded_sentence.size(0) and padded_mask[i] == 1:  # Only consider valid tokens
-            mean_pooled_output[i] = padded_sentence[i]  # Assign the embedding directly
-        else:
-            mean_pooled_output[i] = torch.zeros(padded_sentence.size(1), device=padded_sentence.device)  # Zero padding
-            
-    return mean_pooled_output, padded_mask  # Shape: (max_seq_len, embedding_dim)
-
-
-def apply_self_attention(context_sentences_emb_list, self_attention_layer):
-
-    # Assuming content_embeddings_xl contains the embeddings for c1, c2, c3, c4
-    fixed_length_sentence_vectors = []
-    padded_masks = []
-    transfoxl_attention_masks = [torch.ones(len(content_embedding)) for content_embedding in context_sentences_emb_list]
-
-    # Step 1: Apply self-attention and mean pooling over each sentence embedding
-    max_seq_len = max([len(content_embedding) for content_embedding in context_sentences_emb_list])
-
-    # Step 1: Apply self-attention over each sentence embedding
-    for context_sentence, attention_mask in zip(context_sentences_emb_list, transfoxl_attention_masks):
-        try:
-            context_sentence_embedding_tensor = torch.stack(context_sentence).to(DEVICE)  # Shape: (seq_len, embedding_dim)
-            
-            # Apply self-attention over the encoded words of the sentence
-            attended_output = self_attention_layer(context_sentence_embedding_tensor.unsqueeze(0))  # Shape: (1, seq_len, embedding_dim)
-            
-            # Assuming attention_mask for this sentence is available (1 for words, 0 for padding)
-            # Step 2: Apply mean pooling to obtain fixed-length sentence vector
-            pooled_output, padded_mask = mean_pooling(attended_output.squeeze(0), attention_mask, max_seq_len) 
-
-            fixed_length_sentence_vectors.append(pooled_output)
-            padded_masks.append(padded_mask)
-        except:
-            pass
-
-    return torch.stack(fixed_length_sentence_vectors), torch.stack(padded_masks)
 
 class InterSentenceSelfAttention(nn.Module):
     def __init__(self, embedding_dim, alpha=1.5):
@@ -336,99 +266,12 @@ class SentenceRelevanceIdentifier(nn.Module):
         torch.cuda.empty_cache()
         return torch.sigmoid(x)  # Use sigmoid for binary classification output
 
-def convert_tensor(tensor_list):
-    # Assuming two tensors will form a single matrix row (you can change it based on the requirement)
-    flattened_tensors = [tensor.flatten() for tensor in tensor_list]
-
-    # Create a zero tensor of the required shape (2 rows, with a larger max length to pad smaller sequences)
-    max_length = max([len(tensor) for tensor in flattened_tensors])
-    result = torch.zeros((len(flattened_tensors), max_length))
-
-    # Fill in the values from each tensor into the result matrix
-    for i, tensor in enumerate(flattened_tensors):
-        result[i, :len(tensor)] = tensor
-
-    del flattened_tensors
-
-    gc.collect()
-    torch.cuda.empty_cache()
-    return result
-
-import torch
-
-def pad_tensor_lists(tensor_list1, tensor_list2):
-    # Ensure that both lists have the same number of elements
-    assert len(tensor_list1) == len(tensor_list2), "Both lists must have the same number of tensors"
-    
-    padded_list1 = []
-    padded_list2 = []
-
-    # Iterate through each tensor in both lists
-    for t1, t2 in zip(tensor_list1, tensor_list2):
-        len1 = t1.size(0)
-        len2 = t2.size(0)
-
-        # Find the maximum length between the two tensors
-        max_len = max(len1, len2)
-
-        # Pad tensors with zeros to match the maximum length
-        if len1 < max_len:
-            t1 = torch.cat([t1, torch.zeros(max_len - len1, *t1.shape[1:], device=t1.device)], dim=0)
-        if len2 < max_len:
-            t2 = torch.cat([t2, torch.zeros(max_len - len2, *t2.shape[1:], device=t2.device)], dim=0)
-        
-        # Add the padded tensors to the output lists
-        padded_list1.append(t1.clone().detach().requires_grad_(True))
-        padded_list2.append(t2.clone().detach().requires_grad_(True))
-
-    del tensor_list1
-    del tensor_list2
-
-    gc.collect()
-    torch.cuda.empty_cache()
-    return torch.stack(padded_list1), torch.stack(padded_list2)
-
-from sklearn.metrics import f1_score
-
-# Step 1: Accuracy Calculation
-def calc_accuracy(preds, labels):
-    correct = torch.eq(preds, labels).sum().item()  # Count correct predictions
-    total = torch.numel(labels)  # Total number of elements in the labels tensor
-    gc.collect()
-    return correct / total
-
-def log_epoch_info(file_path, epoch_num, train_loss, valid_loss, valid_accuracy):
-
-    # Open the file in append mode ('a') to keep adding lines without overwriting
-    with open(file_path, 'a') as f:
-        f.write(f"Epoch: {epoch_num}, Train_loss: {train_loss:.4f}, Valid_loss: {valid_loss:.4f}, Valid_accuracy: {valid_accuracy:.2f}%\n")
-
-def attended_sentence_cls(self_attended_sentence_vectors, transfoxl_sep_embs, mask):
-    new_vec, new_mask = [], []
-    linear_layer = nn.Linear(2048, 1024).to(DEVICE)
-    for i in range(len(self_attended_sentence_vectors)):
-        try:
-            tensor_a = self_attended_sentence_vectors[i]
-            tensor_b = transfoxl_sep_embs[i]['[CLS]'][0].to(DEVICE)
-            n, m, _ = tensor_a.shape
-            # Expand tensor_b to match the dimensions of tensor_a for concatenation
-            tensor_b_expanded = tensor_b.unsqueeze(0).unsqueeze(0).expand(n, m, -1)
-
-            # Concatenate along the last dimension
-            result = torch.cat((tensor_a, tensor_b_expanded), dim=-1)
-            new_vec.append(linear_layer(result))
-        except:
-            print("In Except")
-            continue
-    return new_vec
-        
 
 def train_model(model, train_loader, criterion, optimizer):
     model.train()
     total_loss = 0
     c, num_excl = 0, 0
     for texts, labels in tqdm(train_loader):
-        optimizer.zero_grad()
         # Forward pass
         encodings = [framework.forward(text) for text in texts]
         xlnet_encodings, sep, sep_pos, cont, cont_pos = zip(*encodings) #[list(group) for group in list(zip(*encodings))]
@@ -440,19 +283,21 @@ def train_model(model, train_loader, criterion, optimizer):
         for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
             context = elem[3:]
             transfoxl_context_sentences.append(context)
-        attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
+        attn_context_sentences = [apply_self_attention(context, self_attention_layer, DEVICE) for context in transfoxl_context_sentences]
         fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
-        fl_sentence_vectors_cls= attended_sentence_cls(fl_sentence_vectors, transfoxl_sep_embs, padded_masks)
+        fl_sentence_vectors_cls= attended_sentence_cls(fl_sentence_vectors, transfoxl_sep_embs, padded_masks, DEVICE)
         if len(fl_sentence_vectors_cls) == batch_size:
             inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
                                     for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors_cls, padded_masks)]
             attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
             predictions = [classification_head(vectors) for vectors in attended_sentence_output]
-            logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
+            logits = convert_tensor([(pred> 0.49).float() for pred in predictions])
             padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
             loss = criterion(padded_logits, padded_labels)
+            # Backward pass and optimization
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -469,7 +314,7 @@ def train_model(model, train_loader, criterion, optimizer):
 def evaluate_model(model, valid_loader, criterion):
     model.eval()
     total_loss = 0
-    accuracy_sample, f1_score_sample = 0, 0
+    accuracy_sample, f1_score_sample, exact_match = 0, 0, 0
     c, num_excl = 0,0 
     with torch.no_grad():
         for texts, labels in tqdm(valid_loader):
@@ -481,9 +326,9 @@ def evaluate_model(model, valid_loader, criterion):
             for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
                 context = elem[3:]
                 transfoxl_context_sentences.append(context)
-            attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
+            attn_context_sentences = [apply_self_attention(context, self_attention_layer, DEVICE) for context in transfoxl_context_sentences]
             fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
-            fl_sentence_vectors_cls= attended_sentence_cls(fl_sentence_vectors, transfoxl_sep_embs, padded_masks)
+            fl_sentence_vectors_cls= attended_sentence_cls(fl_sentence_vectors, transfoxl_sep_embs, padded_masks, DEVICE)
             if len(fl_sentence_vectors_cls) == batch_size:
                 inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
                                     for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors_cls, padded_masks)]
@@ -491,17 +336,17 @@ def evaluate_model(model, valid_loader, criterion):
                 attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
         
                 predictions = [classification_head(vectors) for vectors in attended_sentence_output]
-                logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
+                logits = convert_tensor([(pred> 0.49).float() for pred in predictions])
                 padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
                 padded_labels = padded_labels.to(DEVICE)
                 padded_logits = padded_logits.to(DEVICE)
                 loss = criterion(padded_logits, padded_labels)
 
                 total_loss += loss.item()
-
-                acc, f1 = calc_accuracy(padded_labels, padded_logits)
+                acc, f1, em = calc_accuracy(padded_labels, padded_logits, DEVICE = DEVICE)
                 accuracy_sample += acc
                 f1_score_sample += f1
+                exact_match += em
             else:
                 num_excl = num_excl + 1
                 print("Batch {} excluded from eval".format(c))
@@ -510,11 +355,13 @@ def evaluate_model(model, valid_loader, criterion):
 
     c = c + 1
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
-    return total_loss / (len(valid_loader) - num_excl), accuracy_sample / (len(valid_loader) - num_excl), f1_score_sample / (len(valid_loader) - num_excl)
+    return total_loss / (len(valid_loader) - num_excl), accuracy_sample / (len(valid_loader) - num_excl), f1_score_sample / (len(valid_loader) - num_excl), exact_match / (len(valid_loader) - num_excl)
 
 def test_model(model, test_loader, output_folder):
     model.eval()
-    accuracy_sample, f1_score_sample = 0, 0
+    all_pred_ans, all_true_ans, all_ques = [], [], []
+    accuracy_sample, f1_score_sample, exact_match = 0, 0, 0
+    bs_sum, meteor_sum, rouge_sum, bleu_sum = 0, 0, 0, 0
     c, num_excl = 0,0 
     with torch.no_grad():
         for texts, labels in tqdm(test_loader):
@@ -526,25 +373,35 @@ def test_model(model, test_loader, output_folder):
             for elem in transfoxl_cont_embs:# Third position onwards are the context sentences
                 context = elem[3:]
                 transfoxl_context_sentences.append(context)
-            attn_context_sentences = [apply_self_attention(context, self_attention_layer) for context in transfoxl_context_sentences]
+            attn_context_sentences = [apply_self_attention(context, self_attention_layer, DEVICE) for context in transfoxl_context_sentences]
             fl_sentence_vectors, padded_masks = [list(group) for group in list(zip(*attn_context_sentences))]
-            fl_sentence_vectors_cls= attended_sentence_cls(fl_sentence_vectors, transfoxl_sep_embs, padded_masks)
+            fl_sentence_vectors_cls= attended_sentence_cls(fl_sentence_vectors, transfoxl_sep_embs, padded_masks, DEVICE)
             inter_attended_sentences = [inter_sentence_attention_layer(final_sentence_embedding, padded_mask)
                                 for (final_sentence_embedding, padded_mask) in zip(fl_sentence_vectors_cls, padded_masks)]
     
             attended_sentence_output, inter_sentence_attention_weights = [list(group) for group in list(zip(*inter_attended_sentences))]
     
             predictions = [classification_head(vectors) for vectors in attended_sentence_output]
-            logits = convert_tensor([(pred> 0.5).float() for pred in predictions])
+            logits = convert_tensor([(pred> 0.49).float() for pred in predictions])
             padded_logits, padded_labels = pad_tensor_lists(logits, labels.float())
             padded_labels = padded_labels.to(DEVICE)
             padded_logits = padded_logits.to(DEVICE)
 
-            acc, f1 = calc_accuracy(padded_labels, padded_logits)
+            acc, f1, em = calc_accuracy(padded_labels, padded_logits, DEVICE = DEVICE)
             accuracy_sample += acc
             f1_score_sample += f1
+            exact_match += em
+
 
             pred_answers, true_answers, questions = gen_answer(padded_logits,labels, texts)
+
+            bs, meteor, rouge, bleu = calc_semantic(true_answers, pred_answers)
+
+            bs_sum += bs
+            meteor_sum += meteor
+            rouge_sum += rouge
+            bleu_sum += bleu
+
             all_pred_ans.append(pred_answers)
             all_true_ans.append(true_answers)
             all_ques.append(questions)
@@ -560,7 +417,9 @@ def test_model(model, test_loader, output_folder):
 
     c = c + 1
     # wandb.log({"epoch_valid_loss": valid_loss, "epoch_valid_accuracy": valid_accuracy})
-    return accuracy_sample / (len(test_loader) - num_excl), f1_score_sample / (len(test_loader) - num_excl)
+    print(f"Bert Score: {bs_sum / (len(test_loader) - num_excl)}, Meteor: {meteor_sum / (len(test_loader) - num_excl)}, Rouge: {rouge_sum / (len(test_loader) - num_excl)}, BLEU: {bleu_sum / (len(test_loader) - num_excl)}")
+
+    return accuracy_sample / (len(test_loader) - num_excl), f1_score_sample / (len(test_loader) - num_excl), exact_match / (len(test_loader) - num_excl)
 
 '''
 context_qa_list: 
@@ -603,7 +462,7 @@ QID_q_int_type_cont = pd.read_pickle('QID_q_int_type_cont.pkl')
 
 
 num = len(list(QID_context.values()))
-# num = 50
+# num = 1000
 print("Total No. Of Datapoints: ", num)
 labels = []
 corr_context = list(QID_context.values())[:num]
@@ -634,14 +493,14 @@ train_dataset = CustomDataset(train_texts, train_labels)
 valid_dataset = CustomDataset(valid_texts, valid_labels)
 test_dataset = CustomDataset(test_texts, test_labels)
 
-batch_size = 4
+batch_size = 8
 # train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
 # valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 # test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=True, num_workers=4, pin_memory=True)
-valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False, num_workers=4, pin_memory=True)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn_3, shuffle=False, num_workers=4, pin_memory=True)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn_text, shuffle=True, num_workers=4, pin_memory=True)
+valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn_text, shuffle=False, num_workers=4, pin_memory=True)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn_text, shuffle=False, num_workers=4, pin_memory=True)
 
 gc.collect()
 
@@ -695,34 +554,37 @@ optimizer = optim.Adam([
 '''
 
 # Training loop
-output_folder = "tip/"
+output_folder = "tl/"
 os.makedirs(os.path.dirname(output_folder), exist_ok=True)
 
-EPOCHS = 25
+EPOCHS = 5
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
-    valid_loss, valid_accuracy, valid_f1 = evaluate_model(model, valid_loader, criterion)
+    valid_loss, valid_accuracy, valid_f1, valid_em = evaluate_model(model, valid_loader, criterion)
 
     print(f'Epoch {epoch+1}/{EPOCHS}')
     print(f'Train Loss: {train_loss:.4f}')
     print(f'Validation Loss: {valid_loss:.4f}')
     print(f'Validation Accuracy: {valid_accuracy:.4f}')
     print(f'Validation F1: {valid_f1:.4f}')
+    print(f'Validation Exact Match: {valid_em:.4f}')
+
 
     checkpoint_path = output_folder + "checkpoint.pth"
     torch.save({'epoch': epoch,                        # Current epoch
     'model_state_dict': model.state_dict(), # Model parameters
     'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
-    test_accuracy, test_f1 = test_model(model, test_loader, output_folder)
+    test_accuracy, test_f1, test_em = test_model(model, test_loader, output_folder)
     test_accuracy = test_accuracy * 100
     print(f'Test Accuracy: {test_accuracy:.4f}')
     print(f'Test F1: {test_f1:.4f}')
-
+    print(f'Test Exact match: {test_em:.4f}')
 
     log_epoch_info_3(output_folder, epoch, train_loss, valid_loss, valid_accuracy, valid_f1, test_accuracy, test_f1)
 
 print(f'Test Accuracy: {test_accuracy:.4f}')
 print(f'Test F1: {test_f1:.4f}')
+print(f'Test Exact match: {test_em:.4f}')
 
 # wandb.finish()
 

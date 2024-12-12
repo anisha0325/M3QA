@@ -43,7 +43,7 @@ warnings.filterwarnings("ignore")
 
 print(torch.cuda.is_available())
 if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:2")
+    DEVICE = torch.device("cuda:5")
     print("Using GPU", DEVICE)
 else:
     DEVICE = torch.device("cpu")
@@ -52,11 +52,10 @@ else:
 
 
 class EncodingFramework(nn.Module):
-    def __init__(self, model_name='allenai/longformer-base-4096'):
+    def __init__(self, model_name='xlnet-large-cased'):
         super(EncodingFramework, self).__init__()
-        self.tokenizer = LongformerTokenizer.from_pretrained(model_name)
-        self.model = LongformerModel.from_pretrained(model_name)
-        self.projection_layer = nn.Linear(768, embedding_dim)  # Projection layer to 1024
+        self.tokenizer = XLNetTokenizer.from_pretrained(model_name)
+        self.model = XLNetModel.from_pretrained(model_name)
 
     def forward(self, text):
         # Tokenize the input while keeping special tokens intact
@@ -78,8 +77,8 @@ class EncodingFramework(nn.Module):
         # Get the token embeddings (output hidden states)
         token_embeddings = outputs.last_hidden_state.detach().cpu()
         cls_embeddings = output_cls.last_hidden_state.detach().cpu()
-        token_embeddings = self.projection_layer(token_embeddings.to(DEVICE))
-        cls_embeddings = self.projection_layer(cls_embeddings.to(DEVICE))
+        # token_embeddings = self.projection_layer(token_embeddings.to(DEVICE))
+        # cls_embeddings = self.projection_layer(cls_embeddings.to(DEVICE))
         total_tokens = input_ids.size(1)
 
         # Define separator tokens
@@ -774,8 +773,8 @@ optimizer = optim.Adam([
 
 
 # Training loop
-output_folder = "ticl/"
-EPOCHS = 5
+output_folder = "ticxn/"
+EPOCHS =5
 os.makedirs(os.path.dirname(output_folder), exist_ok=True)
 
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs

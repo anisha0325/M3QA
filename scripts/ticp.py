@@ -23,6 +23,7 @@ import gc
 import pickle
 import sys #,wandb
 from sklearn.metrics import f1_score
+from itertools import chain
 
 from Visual_embeddings import create_vis_embs
 # from helper import set_random_seed, convert_context, create_labels, collate_fn
@@ -44,7 +45,7 @@ warnings.filterwarnings("ignore")
 
 print(torch.cuda.is_available())
 if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:2")
+    DEVICE = torch.device("cuda:3")
     print("Using GPU", DEVICE)
 else:
     DEVICE = torch.device("cpu")
@@ -348,7 +349,7 @@ class SentenceRelevanceIdentifier(nn.Module):
             return torch.sigmoid(x)  # Use sigmoid for binary classification output
 
 
-def train_model(model, train_loader, criterion, optimizer):
+def train_model(model, train_loader, criterion, optimizer, mode = "multi"):
     model.train()
     total_loss = 0
     c, num_excl = 0, 0
@@ -399,8 +400,8 @@ def train_model(model, train_loader, criterion, optimizer):
             predictions_sent = [classification_head(vectors) for vectors in attended_sentence_output]
             predictions_img = [classification_head(vectors) for vectors in attended_img_output]
 
-            logits_sent = convert_tensor([(pred> 0.5).float() for pred in predictions_sent])
-            logits_img = convert_tensor([(pred> 0.5).float() for pred in predictions_img])
+            logits_sent = convert_tensor([(pred> 0.49).float() for pred in predictions_sent])
+            logits_img = convert_tensor([(pred> 0.49).float() for pred in predictions_img])
             
             padded_logits_sent, padded_labels_sent = pad_tensor_lists(logits_sent, labels.float())
             padded_labels_sent = padded_labels_sent.to(DEVICE)
@@ -418,6 +419,14 @@ def train_model(model, train_loader, criterion, optimizer):
             loss = 0.7 * loss_sent + 0.3 * loss_img
             total_loss += loss.item()
 
+            if mode == "multi":
+                loss.backward()
+            else:
+                loss_sent.backward()
+                loss_img.backward()
+
+            optimizer.step()
+
         else:
             num_excl = num_excl + 1
             print("Batch {} excluded".format(c))
@@ -430,7 +439,7 @@ def train_model(model, train_loader, criterion, optimizer):
 def evaluate_model(model, valid_loader, criterion):
     model.eval()
     total_loss = 0
-    accuracy_sent, accuracy_img, f1_score_sent, f1_score_img = 0, 0, 0, 0
+    accuracy_sent, accuracy_img, f1_score_sent, f1_score_img, em_sent, em_img = 0, 0, 0, 0, 0, 0
     c, num_excl = 0, 0
     with torch.no_grad():
         for texts, imgs, labels, img_labels in tqdm(valid_loader):
@@ -476,16 +485,17 @@ def evaluate_model(model, valid_loader, criterion):
             predictions_sent = [classification_head(vectors) for vectors in attended_sentence_output]
             predictions_img = [classification_head(vectors) for vectors in attended_img_output]
 
-            logits_sent = convert_tensor([(pred> 0.5).float() for pred in predictions_sent])
-            logits_img = convert_tensor([(pred> 0.5).float() for pred in predictions_img])
+            logits_sent = convert_tensor([(pred> 0.49).float() for pred in predictions_sent])
+            logits_img = convert_tensor([(pred> 0.49).float() for pred in predictions_img])
             
             padded_logits_sent, padded_labels_sent = pad_tensor_lists(logits_sent, labels.float())
             padded_labels_sent = padded_labels_sent.to(DEVICE)
             padded_logits_sent = padded_logits_sent.to(DEVICE)
 
-            acc, f1 = calc_accuracy(padded_labels_sent, padded_logits_sent)
+            acc, f1, em = calc_accuracy(padded_labels_sent, padded_logits_sent, DEVICE)
             accuracy_sent += acc
             f1_score_sent += f1
+            em_sent += em
 
 
             logits_img = logits_img.to(DEVICE)
@@ -494,9 +504,10 @@ def evaluate_model(model, valid_loader, criterion):
             padded_labels_img = padded_labels_img.to(DEVICE)
             padded_logits_img = padded_logits_img.to(DEVICE)
 
-            acc, f1 = calc_accuracy(padded_labels_img, padded_logits_img)
+            acc, f1, em = calc_accuracy(padded_labels_img, padded_logits_img, DEVICE)
             accuracy_img += acc
             f1_score_img += f1
+            em_img += em 
 
             loss_sent = criterion(padded_logits_sent, padded_labels_sent)
             loss_img = criterion(padded_logits_img, padded_labels_img)
@@ -504,11 +515,13 @@ def evaluate_model(model, valid_loader, criterion):
             total_loss += loss.item()
 
     c = c + 1
-    return total_loss / (len(valid_loader) - num_excl), accuracy_sent / (len(valid_loader) - num_excl), accuracy_img / (len(valid_loader) - num_excl), f1_score_sent / (len(valid_loader) - num_excl), f1_score_img / (len(valid_loader) - num_excl)
+    return total_loss / (len(valid_loader) - num_excl), accuracy_sent / (len(valid_loader) - num_excl), accuracy_img / (len(valid_loader) - num_excl), f1_score_sent / (len(valid_loader) - num_excl), f1_score_img / (len(valid_loader) - num_excl), em_sent / (len(valid_loader) - num_excl), em_img / (len(valid_loader) - num_excl)
 
-def test_model(model, test_loader, output_folder):
+def test_model(model, test_loader, output_folder, QID_ques):
     model.eval()
-    accuracy_sent, accuracy_img, f1_score_sent, f1_score_img = 0, 0, 0, 0
+    accuracy_sent, accuracy_img, f1_score_sent, f1_score_img, em_sent, em_img = 0, 0, 0, 0, 0, 0
+    all_pred_ans, all_true_ans, all_ques, all_true_imgs, all_pred_imgs, all_QID = [],[],[],[],[],[]
+    bs_sum, meteor_sum, rouge_sum, bleu_sum = 0, 0, 0, 0
     c, num_excl = 0, 0
     total_loss = 0
     with torch.no_grad():
@@ -555,16 +568,17 @@ def test_model(model, test_loader, output_folder):
             predictions_sent = [classification_head(vectors) for vectors in attended_sentence_output]
             predictions_img = [classification_head(vectors) for vectors in attended_img_output]
 
-            logits_sent = convert_tensor([(pred> 0.5).float() for pred in predictions_sent])
-            logits_img = convert_tensor([(pred> 0.5).float() for pred in predictions_img])
+            logits_sent = convert_tensor([(pred> 0.49).float() for pred in predictions_sent])
+            logits_img = convert_tensor([(pred> 0.49).float() for pred in predictions_img])
             
             padded_logits_sent, padded_labels_sent = pad_tensor_lists(logits_sent, labels.float())
             padded_labels_sent = padded_labels_sent.to(DEVICE)
             padded_logits_sent = padded_logits_sent.to(DEVICE)
 
-            acc, f1 = calc_accuracy(padded_labels_sent, padded_logits_sent)
+            acc, f1, em = calc_accuracy(padded_labels_sent, padded_logits_sent, DEVICE)
             accuracy_sent += acc
             f1_score_sent += f1
+            em_sent += em
 
 
             logits_img = logits_img.to(DEVICE)
@@ -573,9 +587,10 @@ def test_model(model, test_loader, output_folder):
             padded_labels_img = padded_labels_img.to(DEVICE)
             padded_logits_img = padded_logits_img.to(DEVICE)
 
-            acc, f1 = calc_accuracy(padded_labels_img, padded_logits_img)
+            acc, f1, em = calc_accuracy(padded_labels_img, padded_logits_img, DEVICE)
             accuracy_img += acc
             f1_score_img += f1
+            em_img += em
 
             loss_sent = criterion(padded_logits_sent, padded_labels_sent)
             loss_img = criterion(padded_logits_img, padded_labels_img)
@@ -586,6 +601,15 @@ def test_model(model, test_loader, output_folder):
             all_pred_ans.append(pred_answers)
             all_true_ans.append(true_answers)
             all_ques.append(questions)
+
+            bs, meteor, rouge, bleu = calc_semantic(true_answers, pred_answers)
+
+
+            bs_sum += bs
+            meteor_sum += meteor
+            rouge_sum += rouge
+            bleu_sum += bleu
+
         
 
     all_pred_ans = list(chain.from_iterable(all_pred_ans))
@@ -597,7 +621,9 @@ def test_model(model, test_loader, output_folder):
 
 
     c = c + 1
-    return accuracy_sent / (len(test_loader) - num_excl), accuracy_img / (len(test_loader) - num_excl), f1_score_sent / (len(test_loader) - num_excl), f1_score_img / (len(test_loader) - num_excl)
+    print(f"Bert Score: {bs_sum / (len(test_loader) - num_excl)}, Meteor: {meteor_sum / (len(test_loader) - num_excl)}, Rouge: {rouge_sum / (len(test_loader) - num_excl)}, BLEU: {bleu_sum / (len(test_loader) - num_excl)}")
+
+    return accuracy_sent / (len(test_loader) - num_excl), accuracy_img / (len(test_loader) - num_excl), f1_score_sent / (len(test_loader) - num_excl), f1_score_img / (len(test_loader) - num_excl), em_sent / (len(valid_loader) - num_excl), em_img / (len(valid_loader) - num_excl)
 
 # --------------------------------------------------------------------------------------------------------------------------------
 '''
@@ -647,7 +673,7 @@ hidden_size = 512
 image_size = 1024
 
 # num = len(list(QID_context.values()))
-num = 30
+num = 20
 labels = []
 corr_context = list(QID_context.values())[:num]
 corr_ans = list(QID_ans.values())[:num]
@@ -707,7 +733,7 @@ train_dataset = CustomDataset(train_texts, train_img, train_labels, train_img_la
 valid_dataset = CustomDataset(valid_texts, valid_img, valid_labels, valid_img_labels)
 test_dataset = CustomDataset(test_texts, test_img, test_labels, test_img_labels)
 
-batch_size = 4
+batch_size = 2
 train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
 valid_loader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
@@ -769,10 +795,10 @@ optimizer = optim.Adam([
 output_folder = "ticp/"
 os.makedirs(os.path.dirname(output_folder), exist_ok=True)
 
-EPOCHS = 2
+EPOCHS = 1
 for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     train_loss = train_model(model, train_loader, criterion, optimizer)
-    valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_img = evaluate_model(model, valid_loader, criterion)
+    valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_img, valid_em_sent, valid_em_img = evaluate_model(model, valid_loader, criterion)
 
     print(f'Epoch {epoch+1}/{EPOCHS}')
     print(f'Train Loss: {train_loss:.4f}')
@@ -781,13 +807,15 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Validation Accuracy Images:  {valid_accuracy_sent:.4f}')
     print(f'Validation F1 Sentences:  {valid_f1_sent:.4f}')
     print(f'Validation F1 Images:  {valid_f1_img:.4f}')
+    print(f'Validation EM Sentences:  {valid_em_sent:.4f}')
+    print(f'Validation EM Images:  {valid_em_img:.4f}')
 
     checkpoint_path = output_folder + "checkpoint.pth"
     torch.save({'epoch': epoch,                        # Current epoch
     'model_state_dict': model.state_dict(), # Model parameters
     'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
 
-    test_sent_accuracy, test_img_accuracy, test_sent_f1, test_img_f1 = test_model(model, test_loader, output_folder)
+    test_sent_accuracy, test_img_accuracy, test_sent_f1, test_img_f1, test_sent_em, test_img_em = test_model(model, test_loader, output_folder, QID_ques)
     test_sent_accuracy = test_sent_accuracy * 100
     test_img_accuracy = test_img_accuracy * 100
 
@@ -795,7 +823,7 @@ for epoch in tqdm(range(EPOCHS)):  # Number of epochs
     print(f'Test  Image Accuracy: {test_img_accuracy:.4f}')
     print(f'Test Sent F1: {test_sent_f1:.4f}')
     print(f'Test Image F1: {test_img_f1:.4f}')
+    print(f'Test Sent EM: {test_sent_em:.4f}')
+    print(f'Test Image EM: {test_img_em:.4f}')
 
-
-
-    log_epoch_info_text_img(output_folder, epoch, train_loss, valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_img, test_sent_accuracy, test_sent_f1, test_img_accuracy, test_img_f1)
+    log_epoch_info_text_img(output_folder, epoch, train_loss, valid_loss, valid_accuracy_sent, valid_accuracy_img, valid_f1_sent, valid_f1_sent, test_sent_accuracy, test_sent_f1, test_img_accuracy, test_img_f1)
