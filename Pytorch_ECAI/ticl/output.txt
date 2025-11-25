@@ -1,5 +1,0 @@
-Epoch: 0, Train_loss: 7.5437, Valid_loss: 7.9216, Valid_sentence_accuracy: 0.9550, Valid_image_accuracy: 0.8410%
-Epoch: 1, Train_loss: 7.5090, Valid_loss: 7.9216, Valid_sentence_accuracy: 0.9550, Valid_image_accuracy: 0.8410%
-Epoch: 2, Train_loss: 7.5417, Valid_loss: 7.9216, Valid_sentence_accuracy: 0.9550, Valid_image_accuracy: 0.8410%
-Epoch: 3, Train_loss: 7.4952, Valid_loss: 7.9216, Valid_sentence_accuracy: 0.9550, Valid_image_accuracy: 0.8410%
-Epoch: 4, Train_loss: 7.5348, Valid_loss: 7.9216, Valid_sentence_accuracy: 0.9550, Valid_image_accuracy: 0.8410%
