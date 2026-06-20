@@ -35,10 +35,3 @@ If you use the dataset or code in your research, please consider citing:
   publisher={ACM New York, NY}
 }
 
-### 📬 Contact
-
-For questions, feel free to contact:
-
-**Anisha Saha**  
-📧 [ansaha@mpi-inf.mpg.de](mailto:ansaha@mpi-inf.mpg.de)  
-🔗 [anisha0325.github.io](https://anisha0325.github.io/)
